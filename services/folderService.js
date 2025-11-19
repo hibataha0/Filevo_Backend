@@ -138,6 +138,7 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
                         current = currPath;
                     }
                 }
+                
 
                 currentParentFolderId = folderMap.get(folderPath);
             }
