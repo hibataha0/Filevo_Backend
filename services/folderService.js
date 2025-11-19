@@ -72,14 +72,32 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
     const userId = req.user._id;
     const folderName = req.body.folderName || 'Uploaded Folder';
     const parentFolderId = req.body.parentFolderId || null;
-    const relativePaths = req.body.relativePaths; // <-- مهم جداً
+    
+    // ✅ دعم طرق مختلفة لإرسال relativePaths
+    // يدعم: req.body.relativePaths أو req.body['relativePaths[]']
+    let relativePaths = req.body.relativePaths;
+    
+    // ✅ إذا كانت undefined، حاول الحصول عليها من relativePaths[]
+    if (!relativePaths && req.body['relativePaths[]']) {
+        relativePaths = req.body['relativePaths[]'];
+    }
+    
+    // ✅ إذا كانت string (مفرد)، حولها إلى array
+    if (typeof relativePaths === 'string') {
+        relativePaths = [relativePaths];
+    }
+    
+    // ✅ التأكد من أن relativePaths هو array
+    if (!Array.isArray(relativePaths)) {
+        relativePaths = [];
+    }
 
     if (!files || files.length === 0) {
         return next(new ApiError('No files uploaded', 400));
     }
 
     if (!relativePaths || relativePaths.length !== files.length) {
-        return next(new ApiError('relativePaths mismatch', 400));
+        return next(new ApiError(`relativePaths mismatch: expected ${files.length}, got ${relativePaths.length}`, 400));
     }
 
     try {
@@ -103,17 +121,23 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
-            const relativePath = relativePaths[i]; // <-- من Flutter
+            const relativePath = relativePaths[i]; // ✅ الآن مؤكد أنه array
 
-            const pathParts = relativePath.split('/'); 
-            const fileName = pathParts.pop(); 
+            // ✅ التحقق من أن relativePath موجود وصالح
+            if (!relativePath || typeof relativePath !== 'string') {
+                console.warn(`⚠️ Invalid relativePath at index ${i}, skipping file: ${file.originalname}`);
+                continue;
+            }
+
+            const pathParts = relativePath.split('/').filter(part => part.length > 0); // ✅ إزالة الأجزاء الفارغة
+            const fileName = pathParts.pop() || file.originalname; // ✅ اسم الملف من المسار أو اسم الملف الأصلي
             const folderPath = pathParts.join('/');
 
             let currentParentFolderId = rootFolder._id;
 
             if (folderPath) {
                 if (!folderMap.has(folderPath)) {
-                    const parts = folderPath.split('/');
+                    const parts = folderPath.split('/').filter(part => part.length > 0);
                     let current = '';
 
                     for (let part of parts) {
@@ -121,6 +145,7 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
 
                         if (!folderMap.has(currPath)) {
                             const parentId = current ? folderMap.get(current) : rootFolder._id;
+
                             const uniqueSubFolderName = await generateUniqueFolderName(part, parentId, userId);
 
                             const newFolder = await Folder.create({
@@ -139,7 +164,6 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
                     }
                 }
                 
-
                 currentParentFolderId = folderMap.get(folderPath);
             }
 
@@ -158,6 +182,7 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
             createdFiles.push(newFile);
         }
 
+        // ✅ تحديث حجم المجلدات
         for (const folder of createdFolders) {
             const folderSize = await calculateFolderSizeRecursive(folder._id);
             await Folder.findByIdAndUpdate(folder._id, { size: folderSize });
