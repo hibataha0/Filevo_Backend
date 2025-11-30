@@ -17,10 +17,10 @@ const roomInvitationSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
-    permission: {
+    role: {
       type: String,
-      enum: ["view", "edit", "delete"],
-      default: "view",
+      enum: ["owner", "editor", "viewer", "commenter"],
+      default: "viewer",
       required: true,
     },
     message: {
@@ -46,6 +46,14 @@ roomInvitationSchema.index({ room: 1, receiver: 1, status: 1 });
 
 const RoomInvitation = mongoose.model('RoomInvitation', roomInvitationSchema);
 module.exports = RoomInvitation;
+
+
+
+
+
+
+
+
 
 
 

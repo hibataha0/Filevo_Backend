@@ -18,7 +18,9 @@ const {
   shareFolder,
   updateFolderPermissions,
   unshareFolder,
-  getFoldersSharedWithMe
+  getFoldersSharedWithMe,
+  getSharedFolderDetailsInRoom,
+  moveFolder
 } = require("../services/folderService");
 const { protect } = require("../services/authService");
 const { uploadFolder: uploadFolderMiddleware } = require("../middlewares/uploadFolderMiddleware");
@@ -51,6 +53,9 @@ router.get("/starred", protect, getStarredFolders);
 // Get folders shared with me
 router.get("/shared-with-me", protect, getFoldersSharedWithMe);
 
+// Get shared folder details in room (must be before /:id)
+router.get("/shared-in-room/:id", protect, getSharedFolderDetailsInRoom);
+
 // Clean expired folders
 router.delete("/clean-expired", protect, cleanExpiredFolders);
 
@@ -62,6 +67,9 @@ router.delete("/:id/permanent", protect, deleteFolderPermanent);
 
 // Toggle star folder (must be before /:id)
 router.put("/:id/star", protect, toggleStarFolder);
+
+// Move folder to another folder (must be before /:id)
+router.put("/:id/move", protect, moveFolder);
 
 // Folder sharing routes (must be before /:id)
 router.post("/:id/share", protect, shareFolder);

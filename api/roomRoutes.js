@@ -7,8 +7,10 @@ const {
   getMyRooms,
   getRoomDetails,
   getPendingInvitations,
-  updateMemberPermission,
+  updateMemberRole,
   removeMember,
+  deleteRoom,
+  leaveRoom,
   shareFileWithRoom,
   shareFolderWithRoom,
   addComment,
@@ -53,16 +55,22 @@ router.post("/:id/share-file", protect, shareFileWithRoom);
 // Share folder with room
 router.post("/:id/share-folder", protect, shareFolderWithRoom);
 
-// Update member permission
-router.put("/:id/members/:memberId", protect, updateMemberPermission);
+// Update member role
+router.put("/:id/members/:memberId", protect, updateMemberRole);
 
 // Remove member
 router.delete("/:id/members/:memberId", protect, removeMember);
+
+// Leave room (user removes themselves)
+router.delete("/:id/leave", protect, leaveRoom);
 
 // Comments
 router.post("/:id/comments", protect, addComment);
 router.get("/:id/comments", protect, listComments);
 router.delete("/:id/comments/:commentId", protect, deleteComment);
+
+// Delete room (owner only) - must be before GET /:id
+router.delete("/:id", protect, deleteRoom);
 
 // Get room details (must be last)
 router.get("/:id", protect, getRoomDetails);

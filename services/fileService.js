@@ -259,25 +259,30 @@ exports.getFileDetails = asyncHandler(async (req, res, next) => {
 // @route   GET /api/files/category/:category
 // @access  Private
 exports.getFilesByCategory = asyncHandler(async (req, res) => {
+  console.time("getFilesByCategory-api");
   const { category } = req.params; // File category from URL
   const userId = req.user._id;
   const parentFolderId = req.query.parentFolderId || null;
 
   // Build query
   const query = { category, userId, isDeleted: false }; // ✅ فقط الملفات غير المحذوفة
-  if (parentFolderId) {
+  if (parentFolderId && parentFolderId !== 'null' && parentFolderId !== '') {
     query.parentFolderId = parentFolderId;
+  } else {
+    query.parentFolderId = null; // ✅ إضافة null صراحة
   }
 
   // جلب الملفات الخاصة بالمستخدم في نفس الفئة
   const files = await File.find(query);
 
   if (!files || files.length === 0) {
+    console.timeEnd("getFilesByCategory-api");
     return res.status(201).json({
       message: `No files found for user in category: ${category}`,
     });
   }
 
+  console.timeEnd("getFilesByCategory-api");
   res.status(200).json({
     message: `Files in category: ${category}`,
     count: files.length,
@@ -285,26 +290,43 @@ exports.getFilesByCategory = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    Get all files for user
+// ✅ تحديث getAllFiles ليعرض فقط الملفات بدون parentFolder
+// ✅ مع إضافة filter حسب category و pagination
+// @desc    Get all files for user (without parentFolder)
 // @route   GET /api/files
 // @access  Private
 exports.getAllFiles = asyncHandler(async (req, res) => {
+  console.time("getAllFiles-api");
   const userId = req.user._id;
-  const parentFolderId = req.query.parentFolderId || null;
+  
+  // ✅ فقط الملفات بدون parentFolder (null)
+  // الملفات التي لها parentFolder تعرض في getFolderContents
+  const parentFolderId = null; // ✅ دائماً null - فقط الملفات بدون مجلد أب
+  
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 10;
   const skip = (page - 1) * limit;
   
+  // ✅ Filter حسب category (اختياري)
+  const category = req.query.category || null;
+  
   // Sorting parameters
   const sortBy = req.query.sortBy || 'createdAt'; // name, size, createdAt, updatedAt, type, category
   const sortOrder = req.query.sortOrder || 'desc'; // asc, desc
-
+  
   // Build query
-  const query = { userId, isDeleted: false };
-  if (parentFolderId) {
-    query.parentFolderId = parentFolderId;
+  // ✅ البحث عن الملفات بدون parentFolder (null)
+  const query = { 
+    userId, 
+    isDeleted: false,
+    parentFolderId: null // ✅ فقط الملفات بدون parentFolder
+  };
+  
+  // ✅ إضافة filter حسب category إذا كان موجوداً
+  if (category && category !== 'all' && category !== '') {
+    query.category = category;
   }
-
+  
   // Build sort object
   const sortObj = {};
   switch (sortBy) {
@@ -328,14 +350,15 @@ exports.getAllFiles = asyncHandler(async (req, res) => {
       sortObj.createdAt = sortOrder === 'asc' ? 1 : -1;
       break;
   }
-
+  
   const files = await File.find(query)
     .skip(skip)
     .limit(limit)
     .sort(sortObj);
-
+  
   const totalFiles = await File.countDocuments(query);
-
+  
+  console.timeEnd("getAllFiles-api");
   res.status(200).json({
     message: "Files retrieved successfully",
     files: files,
@@ -349,6 +372,9 @@ exports.getAllFiles = asyncHandler(async (req, res) => {
     sorting: {
       sortBy,
       sortOrder
+    },
+    filter: {
+      category: category || 'all' // ✅ إرجاع category المستخدم في filter
     }
   });
 });
@@ -769,11 +795,96 @@ exports.updateFile = asyncHandler(async (req, res) => {
     ipAddress: req.ip,
     userAgent: req.get('User-Agent')
   });
-console.log('File metadata updated:', file);
+  console.log('File metadata updated:', file);
   res.status(200).json({
     message: "✅ File metadata updated successfully",
     file: file
     
+  });
+});
+
+// ✅ Move file to another folder
+// @desc    Move file to another folder
+// @route   PUT /api/files/:id/move
+// @access  Private
+exports.moveFile = asyncHandler(async (req, res) => {
+  const fileId = req.params.id;
+  const userId = req.user._id;
+  let { targetFolderId } = req.body; // null للجذر أو folderId للمجلد
+
+  // ✅ معالجة targetFolderId - إذا كان "null" أو "" أو undefined، اجعله null
+  if (targetFolderId === "null" || targetFolderId === "" || targetFolderId === undefined) {
+    targetFolderId = null;
+  }
+
+  // Find file
+  const file = await File.findOne({ _id: fileId, userId: userId });
+  
+  if (!file) {
+    return res.status(404).json({ message: "File not found" });
+  }
+
+  // If targetFolderId is provided, verify it exists and belongs to user
+  if (targetFolderId) {
+    const targetFolder = await Folder.findOne({ _id: targetFolderId, userId: userId });
+    if (!targetFolder) {
+      return res.status(404).json({ message: "Target folder not found" });
+    }
+    
+    // Check if file is already in this folder
+    if (file.parentFolderId && file.parentFolderId.toString() === targetFolderId.toString()) {
+      return res.status(400).json({ message: "File is already in this folder" });
+    }
+  } else {
+    // Moving to root - check if already in root
+    if (!file.parentFolderId || file.parentFolderId === null) {
+      return res.status(400).json({ message: "File is already in root" });
+    }
+  }
+
+  // Store old parent folder ID
+  const oldParentFolderId = file.parentFolderId ? file.parentFolderId.toString() : null;
+  
+  // ✅ استخدام findByIdAndUpdate للتأكد من تحديث القيمة بشكل صحيح
+  const updateData = { parentFolderId: targetFolderId };
+  const updatedFile = await File.findByIdAndUpdate(
+    fileId,
+    { $set: updateData },
+    { new: true, runValidators: true }
+  );
+
+  if (!updatedFile) {
+    return res.status(404).json({ message: "File not found after update" });
+  }
+
+  // ✅ إعادة جلب الملف للتأكد من أن البيانات محدثة
+  const refreshedFile = await File.findById(fileId).populate('parentFolderId', 'name');
+
+  // Update folder sizes
+  if (oldParentFolderId) {
+    await updateFolderSize(oldParentFolderId);
+  }
+  if (targetFolderId) {
+    await updateFolderSize(targetFolderId);
+  }
+
+  // Log activity
+  await logActivity(userId, 'file_moved', 'file', refreshedFile._id, refreshedFile.name, {
+    fromFolder: oldParentFolderId || 'root',
+    toFolder: targetFolderId || 'root',
+    originalSize: refreshedFile.size,
+    type: refreshedFile.type,
+    category: refreshedFile.category
+  }, {
+    ipAddress: req.ip,
+    userAgent: req.get('User-Agent')
+  });
+
+  res.status(200).json({
+    message: "✅ File moved successfully",
+    file: refreshedFile,
+    fromFolder: oldParentFolderId || null,
+    toFolder: targetFolderId || null
   });
 });
 
@@ -1121,3 +1232,359 @@ exports.getFilesSharedWithMe = asyncHandler(async (req, res) => {
     }
   });
 });
+
+// @desc    Get shared file details in room
+// @route   GET /api/files/shared-in-room/:id
+// @access  Private
+exports.getSharedFileDetailsInRoom = asyncHandler(async (req, res, next) => {
+  const fileId = req.params.id;
+  const userId = req.user._id;
+
+  const Room = require('../models/roomModel');
+
+  // Find room where file is shared and user is a member
+  const room = await Room.findOne({
+    'files.fileId': fileId,
+    'members.user': userId,
+    isActive: true
+  })
+    .populate('owner', 'name email')
+    .populate('members.user', 'name email');
+
+  if (!room) {
+    return res.status(404).json({
+      message: "File not found in any room you're a member of"
+    });
+  }
+
+  // Get file from room
+  const fileInRoom = room.files.find(f => f.fileId.toString() === fileId);
+  if (!fileInRoom) {
+    return res.status(404).json({
+      message: "File not found in room"
+    });
+  }
+
+  // Get file details
+  const file = await File.findById(fileId)
+    .populate('userId', 'name email');
+
+  if (!file) {
+    return res.status(404).json({
+      message: "File not found"
+    });
+  }
+
+  // Get sharedBy user info
+  let sharedByUser = null;
+  if (fileInRoom.sharedBy) {
+    sharedByUser = await User.findById(fileInRoom.sharedBy).select('name email');
+  }
+
+  // Calculate readable size
+  const formatBytes = (bytes) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  // Get file extension
+  const getFileExtension = (filename) => {
+    return filename.split('.').pop().toLowerCase();
+  };
+
+  res.status(200).json({
+    message: "Shared file details retrieved successfully",
+    file: {
+      _id: file._id,
+      name: file.name,
+      category: file.category,
+      size: file.size,
+      sizeFormatted: formatBytes(file.size),
+      extension: getFileExtension(file.name),
+      sharedAt: fileInRoom.sharedAt,
+      lastModified: file.updatedAt,
+      sharedBy: sharedByUser ? {
+        _id: sharedByUser._id,
+        name: sharedByUser.name,
+        email: sharedByUser.email
+      } : null,
+      room: {
+        _id: room._id,
+        name: room.name,
+        description: room.description
+      },
+      owner: {
+        _id: file.userId._id,
+        name: file.userId.name,
+        email: file.userId.email
+      }
+    }
+  });
+});
+exports.getAllItems = asyncHandler(async (req, res, next) => {
+    const userId = req.user._id;
+    
+    // ✅ فقط المجلدات والملفات بدون parent (null)
+    const parentId = null; // ✅ دائماً null
+    
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+
+    const folderQuery = { 
+        userId, 
+        isDeleted: false,
+        parentId: null // ✅ فقط المجلدات بدون parent
+    };
+    
+    const fileQuery = { 
+        userId, 
+        isDeleted: false,
+        parentFolderId: null // ✅ فقط الملفات بدون parent
+    };
+
+    const folders = await Folder.find(folderQuery)
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 });
+    
+    const files = await File.find(fileQuery)
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 });
+
+    const totalFolders = await Folder.countDocuments(folderQuery);
+    const totalFiles = await File.countDocuments(fileQuery);
+
+    const allItems = [
+        ...folders.map(folder => ({ ...folder.toObject(), type: 'folder' })),
+        ...files.map(file => ({ ...file.toObject(), type: 'file' }))
+    ];
+    
+    const totalItems = totalFolders + totalFiles;
+
+    res.status(200).json({
+        message: 'All items retrieved successfully',
+        items: allItems,
+        folders: folders,
+        files: files,
+        pagination: {
+            currentPage: page,
+            totalPages: Math.ceil(totalItems / limit),
+            totalItems: totalItems,
+            totalFolders: totalFolders,
+            totalFiles: totalFiles,
+            hasNext: page < Math.ceil(totalItems / limit),
+            hasPrev: page > 1
+        }
+    });
+});
+// ✅ Get categories statistics (count and size for each category)
+// @desc    Get categories statistics - يحسب حجم جميع الملفات وعددهم بناءً على التصنيف
+// @route   GET /api/files/categories/stats
+// @access  Private
+exports.getCategoriesStats = asyncHandler(async (req, res) => {
+    console.time("getCategoriesStats-api");
+    const userId = req.user._id;
+    const mongoose = require('mongoose');
+
+    console.log("🔵 [DEBUG] Start getCategoriesStats for User:", userId);
+
+    // قائمة التصنيفات
+    const categories = ['Images', 'Videos', 'Audio', 'Documents', 'Compressed', 'Applications', 'Code', 'Others'];
+
+    const userIdObjectId = mongoose.Types.ObjectId.isValid(userId)
+        ? new mongoose.Types.ObjectId(userId)
+        : userId;
+
+    // ============================
+    // 🟦 Aggregation — جميع الملفات
+    // ============================
+    const aggregationResult = await File.aggregate([
+        {
+            $match: {
+                userId: userIdObjectId,
+                isDeleted: false
+            }
+        },
+        {
+            $group: {
+                _id: '$category',
+                filesCount: { $sum: 1 },
+                totalSize: { $sum: '$size' }
+            }
+        }
+    ]);
+
+    console.log("🔵 [DEBUG] All Files Aggregation Result:", aggregationResult);
+
+    // تحويل النتيجة إلى Map
+    const statsMap = new Map();
+    aggregationResult.forEach(item => {
+        statsMap.set(item._id, {
+            filesCount: Number(item.filesCount) || 0,
+            totalSize: Number(item.totalSize) || 0
+        });
+    });
+
+    // ======================================
+    // 🟡 Aggregation — ملفات ROOT فقط (بدون أب)
+    // ======================================
+    const rootAggregation = await File.aggregate([
+        {
+            $match: {
+                userId: userIdObjectId,
+                isDeleted: false,
+                parentFolderId: null  // ROOT ONLY
+            }
+        },
+        {
+            $group: {
+                _id: '$category',
+                filesCount: { $sum: 1 },
+                totalSize: { $sum: '$size' }
+            }
+        }
+    ]);
+
+    console.log("🟡 [DEBUG] ROOT Only Aggregation Result:", rootAggregation);
+
+    // تحويل نتيجة ROOT إلى Map
+    const rootStatsMap = new Map();
+    rootAggregation.forEach(item => {
+        rootStatsMap.set(item._id, {
+            filesCount: Number(item.filesCount) || 0,
+            totalSize: Number(item.totalSize) || 0
+        });
+    });
+
+    // ============================
+    // بناء الإحصائيات كاملة
+    // ============================
+    const stats = categories.map(category => {
+        const stat = statsMap.get(category);
+        return {
+            category,
+            filesCount: stat ? stat.filesCount : 0,
+            totalSize: stat ? stat.totalSize : 0
+        };
+    });
+
+    console.log("🔵 [DEBUG] Final Categories Stats:", stats);
+
+    // ============================
+    // بناء إحصائيات ROOT فقط
+    // ============================
+    const rootStats = categories.map(category => {
+        const stat = rootStatsMap.get(category);
+        return {
+            category,
+            filesCount: stat ? stat.filesCount : 0,
+            totalSize: stat ? stat.totalSize : 0
+        };
+    });
+
+    console.log("🟡 [DEBUG] Final ROOT Categories Stats:", rootStats);
+
+    // ============================
+    // حساب الإجمالي
+    // ============================
+    const totalStats = stats.reduce((acc, stat) => {
+        acc.totalFiles += stat.filesCount;
+        acc.totalSize += stat.totalSize;
+        return acc;
+    }, { totalFiles: 0, totalSize: 0 });
+
+    // دالة تنسيق الحجم
+    const formatBytes = (bytes) => {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    };
+
+    console.log("🟢 [DEBUG] Sending Response...");
+
+    console.timeEnd("getCategoriesStats-api");
+
+    // ============================
+    // الرد النهائي
+    // ============================
+    res.status(200).json({
+        message: "Categories statistics retrieved successfully",
+
+        categories: stats.map(stat => ({
+            ...stat,
+            totalSizeFormatted: formatBytes(stat.totalSize)
+        })),
+
+        rootCategories: rootStats.map(stat => ({
+            ...stat,
+            totalSizeFormatted: formatBytes(stat.totalSize)
+        })),
+
+        totals: {
+            totalFiles: totalStats.totalFiles,
+            totalSize: totalStats.totalSize,
+            totalSizeFormatted: formatBytes(totalStats.totalSize)
+        }
+    });
+});
+exports.getRootCategoriesStats = asyncHandler(async (req, res) => {
+  const userId = req.user._id;
+
+  const rootOnly = await calculateRootStats(userId);
+  console.log("Root Categories Stats:", rootOnly);
+  
+  res.status(200).json({
+    status: "success",
+    data: rootOnly
+  });
+});
+
+
+// 🔹 دالة لحساب الملفات الموجودة في ROOT فقط
+async function calculateRootStats(userId) {
+  const mongoose = require('mongoose');
+  const userIdObj = new mongoose.Types.ObjectId(userId);
+
+  const categories = [
+    'Images', 'Videos', 'Audio', 'Documents',
+    'Compressed', 'Applications', 'Code', 'Others'
+  ];
+
+  const rootAgg = await File.aggregate([
+    {
+      $match: {
+        userId: userIdObj,
+        parentFolderId: null,   // ✔ فقط الملفات اللي مش داخل مجلد
+        isDeleted: false
+      }
+    },
+    {
+      $group: {
+        _id: '$category',
+        filesCount: { $sum: 1 },
+        totalSize: { $sum: '$size' }
+      }
+    }
+  ]);
+
+  const map = new Map();
+  rootAgg.forEach(item => {
+    map.set(item._id, {
+      filesCount: item.filesCount,
+      totalSize: item.totalSize
+    });
+  });
+
+  return categories.map(cat => ({
+    category: cat,
+    filesCount: map.get(cat)?.filesCount || 0,
+    totalSize: map.get(cat)?.totalSize || 0
+  }));
+}

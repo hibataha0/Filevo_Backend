@@ -24,16 +24,11 @@ const roomSchema = new mongoose.Schema(
           ref: "User",
           required: true,
         },
-        permission: {
-          type: String,
-          enum: ["view", "edit", "delete"],
-          default: "view",
-          required: true,
-        },
         role: {
           type: String,
           enum: ["owner", "editor", "viewer", "commenter"],
           default: "viewer",
+          required: true,
         },
         joinedAt: {
           type: Date,
@@ -48,6 +43,11 @@ const roomSchema = new mongoose.Schema(
           ref: "File",
           required: true,
         },
+        sharedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: false, // Not required for old shared files
+        },
         sharedAt: {
           type: Date,
           default: Date.now,
@@ -60,6 +60,11 @@ const roomSchema = new mongoose.Schema(
           type: mongoose.Schema.Types.ObjectId,
           ref: "Folder",
           required: true,
+        },
+        sharedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: false, // Not required for old shared folders
         },
         sharedAt: {
           type: Date,

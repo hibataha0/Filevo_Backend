@@ -9,13 +9,14 @@ const commentSchema = new mongoose.Schema(
     },
     targetType: {
       type: String,
-      enum: ['file', 'folder'],
+      enum: ['file', 'folder', 'room'],
       required: true,
     },
     targetId: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true,
+      required: false, // Not required for room comments
       index: true,
+      default: null,
     },
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -35,6 +36,13 @@ commentSchema.index({ room: 1, targetType: 1, targetId: 1, createdAt: -1 });
 
 const Comment = mongoose.model('Comment', commentSchema);
 module.exports = Comment;
+
+
+
+
+
+
+
 
 
 

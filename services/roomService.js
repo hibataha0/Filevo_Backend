@@ -5,6 +5,27 @@ const User = require("../models/userModel");
 const ApiError = require("../utils/apiError");
 const { logActivity } = require("./activityLogService");
 
+// Helper function to get permissions based on role
+const getPermissionsFromRole = (role) => {
+  const rolePermissions = {
+    owner: ['view', 'edit', 'delete', 'share'],
+    editor: ['view', 'edit'],
+    viewer: ['view'],
+    commenter: ['view', 'comment']
+  };
+  return rolePermissions[role] || [];
+};
+
+// Helper function to check if role has specific permission
+const hasPermission = (role, permission) => {
+  const permissions = getPermissionsFromRole(role);
+  return permissions.includes(permission);
+};
+
+// Export helper functions for use in other modules
+exports.getPermissionsFromRole = getPermissionsFromRole;
+exports.hasPermission = hasPermission;
+
 // Helper function to clean up old invitations
 const cleanupOldInvitations = async () => {
   const thirtyDaysAgo = new Date();
@@ -40,7 +61,6 @@ exports.createRoom = asyncHandler(async (req, res, next) => {
     members: [
       {
         user: userId,
-        permission: "delete", // Owner has full access
         role: "owner",
       },
     ],
@@ -68,10 +88,16 @@ exports.createRoom = asyncHandler(async (req, res, next) => {
 exports.sendInvitation = asyncHandler(async (req, res, next) => {
   const roomId = req.params.id;
   const userId = req.user._id;
-  const { receiverId, permission, message } = req.body;
+  const { email, role, message } = req.body;
 
-  if (!receiverId) {
-    return next(new ApiError('Receiver ID is required', 400));
+  if (!email) {
+    return next(new ApiError('Email is required', 400));
+  }
+
+  // Validate email format
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return next(new ApiError('Invalid email format', 400));
   }
 
   // Find room and check ownership or admin role
@@ -89,20 +115,20 @@ exports.sendInvitation = asyncHandler(async (req, res, next) => {
     return next(new ApiError('Only room owner or admin can send invitations', 403));
   }
 
-  // Don't allow inviting yourself
-  if (receiverId === userId.toString()) {
-    return next(new ApiError('Cannot invite yourself', 400));
+  // Check if user exists by email
+  const receiver = await User.findOne({ email: email.toLowerCase().trim() });
+  if (!receiver) {
+    return next(new ApiError('User not found with this email', 404));
   }
 
-  // Check if user exists
-  const receiver = await User.findById(receiverId);
-  if (!receiver) {
-    return next(new ApiError('User not found', 404));
+  // Don't allow inviting yourself
+  if (receiver._id.toString() === userId.toString()) {
+    return next(new ApiError('Cannot invite yourself', 400));
   }
 
   // Check if user is already a member
   const alreadyMember = room.members.find(
-    m => m.user.toString() === receiverId
+    m => m.user.toString() === receiver._id.toString()
   );
   if (alreadyMember) {
     return next(new ApiError('User is already a member', 400));
@@ -111,19 +137,31 @@ exports.sendInvitation = asyncHandler(async (req, res, next) => {
   // Check if there's already a pending invitation
   const existingInvitation = await RoomInvitation.findOne({
     room: roomId,
-    receiver: receiverId,
+    receiver: receiver._id,
     status: 'pending'
   });
   if (existingInvitation) {
-    return next(new ApiError('Invitation already sent', 400));
+    return next(new ApiError('Invitation already sent to this user', 400));
+  }
+
+  // Validate role if provided
+  const validRoles = ["owner", "editor", "viewer", "commenter"];
+  const invitationRole = role || "viewer";
+  if (!validRoles.includes(invitationRole)) {
+    return next(new ApiError('Invalid role. Must be one of: owner, editor, viewer, commenter', 400));
+  }
+
+  // Don't allow inviting as owner
+  if (invitationRole === "owner") {
+    return next(new ApiError('Cannot invite user as owner', 400));
   }
 
   // Create invitation
   const invitation = await RoomInvitation.create({
     room: roomId,
     sender: userId,
-    receiver: receiverId,
-    permission: permission || "view",
+    receiver: receiver._id,
+    role: invitationRole,
     message: message || "",
     status: 'pending'
   });
@@ -133,8 +171,9 @@ exports.sendInvitation = asyncHandler(async (req, res, next) => {
 
   // Log activity
   await logActivity(userId, 'room_invitation_sent', 'room', roomId, room.name, {
-    receiverId: receiverId,
-    permission: permission || "view"
+    receiverEmail: email,
+    receiverId: receiver._id,
+    role: invitationRole
   }, {
     ipAddress: req.ip,
     userAgent: req.get('User-Agent')
@@ -178,8 +217,7 @@ exports.acceptInvitation = asyncHandler(async (req, res, next) => {
   
   room.members.push({
     user: userId,
-    permission: invitation.permission,
-    role: 'viewer',
+    role: invitation.role,
   });
 
   await room.save();
@@ -324,14 +362,18 @@ exports.getPendingInvitations = asyncHandler(async (req, res, next) => {
   });
 });
 
-// @desc    Update member permission
+// @desc    Update member role
 // @route   PUT /api/rooms/:id/members/:memberId
 // @access  Private
-exports.updateMemberPermission = asyncHandler(async (req, res, next) => {
+exports.updateMemberRole = asyncHandler(async (req, res, next) => {
   const roomId = req.params.id;
   const memberId = req.params.memberId;
   const userId = req.user._id;
-  const { permission, role } = req.body;
+  const { role } = req.body;
+
+  if (!role) {
+    return next(new ApiError('Role is required', 400));
+  }
 
   // Find room
   const room = await Room.findById(roomId);
@@ -345,7 +387,7 @@ exports.updateMemberPermission = asyncHandler(async (req, res, next) => {
   );
   
   if (!currentMember || (currentMember.role !== 'owner')) {
-    return next(new ApiError('Only owner can update member permissions', 403));
+    return next(new ApiError('Only owner can update member roles', 403));
   }
 
   // Find target member
@@ -354,32 +396,27 @@ exports.updateMemberPermission = asyncHandler(async (req, res, next) => {
     return next(new ApiError('Member not found', 404));
   }
 
-  // Cannot change owner role/permission
+  // Cannot change owner role
   if (member.role === 'owner') {
-    return next(new ApiError('Cannot change owner permissions', 400));
+    return next(new ApiError('Cannot change owner role', 400));
   }
 
-  // Update permission
-  if (permission) {
-    if (!["view", "edit", "delete"].includes(permission)) {
-      return next(new ApiError('Invalid permission', 400));
-    }
-    member.permission = permission;
+  // Validate role
+  if (!["owner", "editor", "viewer", "commenter"].includes(role)) {
+    return next(new ApiError('Invalid role. Must be one of: owner, editor, viewer, commenter', 400));
+  }
+
+  // Prevent assigning owner role to other members
+  if (role === 'owner') {
+    return next(new ApiError('Cannot assign owner role to other members', 400));
   }
 
   // Update role
-  if (role) {
-    if (!["owner", "editor", "viewer", "commenter"].includes(role)) {
-      return next(new ApiError('Invalid role', 400));
-    }
-    // Prevent assigning multiple owners: only owner can assign and not to self demote/upgrade silently here
-    member.role = role;
-  }
-
+  member.role = role;
   await room.save();
 
   res.status(200).json({
-    message: "✅ Member permissions updated successfully",
+    message: "✅ Member role updated successfully",
     room: room
   });
 });
@@ -398,13 +435,19 @@ exports.removeMember = asyncHandler(async (req, res, next) => {
     return next(new ApiError('Room not found', 404));
   }
 
-  // Check if current user is owner
+  // Check if current user is the room owner (من أنشأ الروم)
+  const isRoomOwner = room.owner.toString() === userId.toString();
+
+  // Check if current user has 'owner' or 'admin' role in members
   const currentMember = room.members.find(
     m => m.user.toString() === userId.toString()
   );
-  
-  if (!currentMember || (currentMember.role !== 'owner')) {
-    return next(new ApiError('Only owner can remove members', 403));
+  const hasOwnerRole = currentMember && currentMember.role === 'owner';
+  const hasAdminRole = currentMember && currentMember.role === 'admin';
+
+  // السماح لمالك الروم (من أنشأ الروم) أو من له role 'owner' أو 'admin' في الـ members بحذف الأعضاء
+  if (!isRoomOwner && !hasOwnerRole && !hasAdminRole) {
+    return next(new ApiError('Only room owner, member with owner role, or admin can remove members', 403));
   }
 
   // Find target member
@@ -413,17 +456,117 @@ exports.removeMember = asyncHandler(async (req, res, next) => {
     return next(new ApiError('Member not found', 404));
   }
 
-  // Cannot remove owner
-  if (member.role === 'owner') {
+  // Cannot remove the room owner (من أنشأ الروم)
+  const isTargetMemberRoomOwner = room.owner.toString() === member.user.toString();
+  if (isTargetMemberRoomOwner) {
     return next(new ApiError('Cannot remove room owner', 400));
   }
 
-  // Remove member
-  member.remove();
+  // Cannot remove member with 'owner' role unless you are the room owner
+  // (من له role 'owner' لا يمكن حذفه إلا من قبل مالك الروم الأصلي)
+  // هذا ينطبق على من له role 'owner' أو 'admin' - فقط مالك الروم يمكنه حذف عضو له role 'owner'
+  if (member.role === 'owner' && !isRoomOwner) {
+    return next(new ApiError('Only room owner can remove members with owner role', 403));
+  }
+
+  // Remove member from array
+  // استخدام filter() لحذف العضو من المصفوفة
+  room.members = room.members.filter(
+    m => m._id.toString() !== memberId.toString()
+  );
+  
+  // بديل آخر إذا لم يعمل filter() (استخدم أحد الطريقتين):
+  // room.members.pull(memberId);
+  
   await room.save();
 
   res.status(200).json({
     message: "✅ Member removed successfully",
+    room: room
+  });
+});
+
+// @desc    Delete room
+// @route   DELETE /api/rooms/:id
+// @access  Private (owner only)
+exports.deleteRoom = asyncHandler(async (req, res, next) => {
+  const roomId = req.params.id;
+  const userId = req.user._id;
+
+  // Find room
+  const room = await Room.findById(roomId);
+  if (!room) {
+    return next(new ApiError('Room not found', 404));
+  }
+
+  // Check if current user is the room owner
+  if (room.owner.toString() !== userId.toString()) {
+    return next(new ApiError('Only room owner can delete the room', 403));
+  }
+
+  // Delete all invitations related to this room
+  await RoomInvitation.deleteMany({ room: roomId });
+
+  // Delete all comments related to this room
+  const Comment = require('../models/commentModel');
+  await Comment.deleteMany({ room: roomId });
+
+  // Delete the room
+  await Room.findByIdAndDelete(roomId);
+
+  // Log activity
+  await logActivity(userId, 'room_deleted', 'room', roomId, room.name, {}, {
+    ipAddress: req.ip,
+    userAgent: req.get('User-Agent')
+  });
+
+  res.status(200).json({
+    message: "✅ Room deleted successfully"
+  });
+});
+
+// @desc    Leave room (user removes themselves from room)
+// @route   DELETE /api/rooms/:id/leave
+// @access  Private
+exports.leaveRoom = asyncHandler(async (req, res, next) => {
+  const roomId = req.params.id;
+  const userId = req.user._id;
+
+  // Find room
+  const room = await Room.findById(roomId);
+  if (!room) {
+    return next(new ApiError('Room not found', 404));
+  }
+
+  // Check if user is a member
+  const member = room.members.find(
+    m => m.user.toString() === userId.toString()
+  );
+  
+  if (!member) {
+    return next(new ApiError('You are not a member of this room', 403));
+  }
+
+  // Cannot leave if you are the room owner
+  if (room.owner.toString() === userId.toString()) {
+    return next(new ApiError('Room owner cannot leave. Please delete the room instead or transfer ownership', 400));
+  }
+
+  // Remove member from array
+  room.members = room.members.filter(
+    m => m.user.toString() !== userId.toString()
+  );
+  
+  await room.save();
+
+  // Log activity
+  await logActivity(userId, 'room_left', 'room', roomId, room.name, {}, {
+    ipAddress: req.ip,
+    userAgent: req.get('User-Agent')
+  });
+
+  res.status(200).json({
+    message: "✅ You have left the room successfully",
     room: room
   });
 });
@@ -471,7 +614,7 @@ exports.shareFileWithRoom = asyncHandler(async (req, res, next) => {
   }
 
   // Add file to room
-  room.files.push({ fileId });
+  room.files.push({ fileId, sharedBy: userId });
   await room.save();
 
   res.status(200).json({
@@ -523,7 +666,7 @@ exports.shareFolderWithRoom = asyncHandler(async (req, res, next) => {
   }
 
   // Add folder to room
-  room.folders.push({ folderId });
+  room.folders.push({ folderId, sharedBy: userId });
   await room.save();
 
   res.status(200).json({
@@ -536,7 +679,7 @@ exports.shareFolderWithRoom = asyncHandler(async (req, res, next) => {
 // Comments on files/folders
 // ==========================
 
-// @desc    Add comment to a file/folder in a room
+// @desc    Add comment to a file/folder/room in a room
 // @route   POST /api/rooms/:id/comments
 // @access  Private (room member: owner/editor/commenter)
 exports.addComment = asyncHandler(async (req, res, next) => {
@@ -544,12 +687,15 @@ exports.addComment = asyncHandler(async (req, res, next) => {
   const userId = req.user._id;
   const { targetType, targetId, content } = req.body;
 
-  if (!targetType || !["file", "folder"].includes(targetType)) {
-    return next(new ApiError('Invalid or missing targetType', 400));
+  if (!targetType || !["file", "folder", "room"].includes(targetType)) {
+    return next(new ApiError('Invalid or missing targetType. Must be "file", "folder", or "room"', 400));
   }
-  if (!targetId) {
-    return next(new ApiError('targetId is required', 400));
+  
+  // targetId is required for file and folder, but not for room
+  if (targetType !== 'room' && !targetId) {
+    return next(new ApiError('targetId is required for file and folder comments', 400));
   }
+  
   if (!content || !content.trim()) {
     return next(new ApiError('content is required', 400));
   }
@@ -568,27 +714,28 @@ exports.addComment = asyncHandler(async (req, res, next) => {
     return next(new ApiError('Your role does not allow adding comments', 403));
   }
 
-  // verify target is shared within room
+  // verify target is shared within room (only for file/folder, not for room)
   if (targetType === 'file') {
     const exists = room.files.find(f => f.fileId.toString() === targetId);
     if (!exists) return next(new ApiError('File is not shared with this room', 404));
-  } else {
+  } else if (targetType === 'folder') {
     const exists = room.folders.find(f => f.folderId.toString() === targetId);
     if (!exists) return next(new ApiError('Folder is not shared with this room', 404));
   }
+  // For targetType === 'room', no validation needed
 
   const Comment = require('../models/commentModel');
   const comment = await Comment.create({
     room: roomId,
     targetType,
-    targetId,
+    targetId: targetType === 'room' ? null : targetId, // null for room comments
     user: userId,
     content: content.trim(),
   });
 
   await comment.populate('user', 'name email');
 
-  await logActivity(userId, 'comment_added', targetType, targetId, undefined, { roomId }, {
+  await logActivity(userId, 'comment_added', targetType, targetId || roomId, undefined, { roomId }, {
     ipAddress: req.ip,
     userAgent: req.get('User-Agent')
   });
@@ -599,7 +746,7 @@ exports.addComment = asyncHandler(async (req, res, next) => {
   });
 });
 
-// @desc    List comments for a specific file/folder in a room
+// @desc    List comments for a specific file/folder/room in a room
 // @route   GET /api/rooms/:id/comments
 // @access  Private (room members)
 exports.listComments = asyncHandler(async (req, res, next) => {
@@ -607,11 +754,13 @@ exports.listComments = asyncHandler(async (req, res, next) => {
   const userId = req.user._id;
   const { targetType, targetId } = req.query;
 
-  if (!targetType || !["file", "folder"].includes(targetType)) {
-    return next(new ApiError('Invalid or missing targetType', 400));
+  if (!targetType || !["file", "folder", "room"].includes(targetType)) {
+    return next(new ApiError('Invalid or missing targetType. Must be "file", "folder", or "room"', 400));
   }
-  if (!targetId) {
-    return next(new ApiError('targetId is required', 400));
+  
+  // targetId is required for file and folder, but not for room
+  if (targetType !== 'room' && !targetId) {
+    return next(new ApiError('targetId is required for file and folder comments', 400));
   }
 
   const room = await Room.findById(roomId);
@@ -624,17 +773,24 @@ exports.listComments = asyncHandler(async (req, res, next) => {
     return next(new ApiError('You must be a room member to view comments', 403));
   }
 
-  // verify target is shared within room
+  // verify target is shared within room (only for file/folder, not for room)
   if (targetType === 'file') {
     const exists = room.files.find(f => f.fileId.toString() === targetId);
     if (!exists) return next(new ApiError('File is not shared with this room', 404));
-  } else {
+  } else if (targetType === 'folder') {
     const exists = room.folders.find(f => f.folderId.toString() === targetId);
     if (!exists) return next(new ApiError('Folder is not shared with this room', 404));
   }
+  // For targetType === 'room', no validation needed
 
   const Comment = require('../models/commentModel');
-  const comments = await Comment.find({ room: roomId, targetType, targetId })
+  const query = { 
+    room: roomId, 
+    targetType,
+    ...(targetType === 'room' ? { targetId: null } : { targetId })
+  };
+  
+  const comments = await Comment.find(query)
     .populate('user', 'name email')
     .sort({ createdAt: 1 });
 
@@ -744,6 +900,59 @@ exports.getInvitationStats = asyncHandler(async (req, res, next) => {
   res.status(200).json({
     message: "Invitation statistics retrieved successfully",
     stats: stats[0]
+  });
+});
+
+exports.removeFileFromRoom = asyncHandler(async (req, res, next) => {
+  const roomId = req.params.id;
+  const fileId = req.params.fileId;
+  const userId = req.user._id;
+
+  // Find room
+  const room = await Room.findById(roomId);
+  if (!room) {
+    return next(new ApiError('Room not found', 404));
+  }
+
+  // Check if current user is the room owner (من أنشأ الروم)
+  const isRoomOwner = room.owner.toString() === userId.toString();
+
+  // Check if current user has 'owner' or 'admin' role in members
+  const currentMember = room.members.find(
+    m => m.user.toString() === userId.toString()
+  );
+  const hasOwnerRole = currentMember && currentMember.role === 'owner';
+  const hasAdminRole = currentMember && currentMember.role === 'admin';
+
+  // Find target file in room
+  const fileIndex = room.files.findIndex(
+    f => f.fileId.toString() === fileId.toString()
+  );
+  
+  if (fileIndex === -1) {
+    return next(new ApiError('File not found in room', 404));
+  }
+
+  const file = room.files[fileIndex];
+
+  // Check if current user is the one who shared the file (sharedBy)
+  const isFileSharer = file.sharedBy && file.sharedBy.toString() === userId.toString();
+
+  // السماح لمالك الروم أو من شارك الملف أو من له role 'owner' أو 'admin' بإزالة الملف
+  if (!isRoomOwner && !isFileSharer && !hasOwnerRole && !hasAdminRole) {
+    return next(new ApiError('Only room owner, file sharer, member with owner role, or admin can remove files', 403));
+  }
+
+  // Remove file from array
+  room.files = room.files.filter(
+    f => f.fileId.toString() !== fileId.toString()
+  );
+  
+  await room.save();
+
+  res.status(200).json({
+    message: "✅ File removed from room successfully",
+    room: room
   });
 });
 

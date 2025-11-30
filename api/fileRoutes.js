@@ -20,7 +20,11 @@ const {
   shareFile,
   updateFilePermissions,
   unshareFile,
-  getFilesSharedWithMe
+  getFilesSharedWithMe,
+  getSharedFileDetailsInRoom,
+  getCategoriesStats,
+  moveFile,
+  getRootCategoriesStats
 } = require("../services/fileService");
 const { protect } = require("../services/authService");
 const { 
@@ -60,6 +64,9 @@ router.get("/recent", protect, getRecentFiles);
 // Get files by category
 router.get("/category/:category", protect, getFilesByCategory);
 
+// Get categories statistics
+router.get("/categories/stats", protect, getCategoriesStats);
+
 // Get trash files
 router.get("/trash", protect, getTrashFiles);
 
@@ -68,6 +75,9 @@ router.get("/starred", protect, getStarredFiles);
 
 // Get files shared with me
 router.get("/shared-with-me", protect, getFilesSharedWithMe);
+
+// Get shared file details in room (must be before /:id)
+router.get("/shared-in-room/:id", protect, getSharedFileDetailsInRoom);
 
 // Clean expired files
 router.delete("/clean-expired", protect, cleanExpiredFiles);
@@ -84,6 +94,9 @@ router.delete("/:id/permanent", protect, deleteFilePermanent);
 // Toggle star file (must be before /:id)
 router.put("/:id/star", protect, toggleStarFile);
 
+// Move file to another folder (must be before /:id)
+router.put("/:id/move", protect, moveFile);
+
 // File sharing routes (must be before /:id)
 router.post("/:id/share", protect, shareFile);
 router.put("/:id/share", protect, updateFilePermissions);
@@ -97,5 +110,6 @@ router.delete("/:id", protect, deleteFile);
 
 // Get file details
 router.get("/:id", protect, getFileDetails);
+router.get("/categories/stats/root",protect,getRootCategoriesStats);
 
 module.exports = router;
