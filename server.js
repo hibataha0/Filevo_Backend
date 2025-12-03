@@ -23,24 +23,39 @@ const roomService = require("./services/roomService");
 
 // Schedule automatic cleanup of old invitations every 24 hours
 const scheduleInvitationCleanup = () => {
-  // Run immediately on startup
-  roomService.cleanupOldInvitationsDirect()
-    .then(deletedCount => {
-      console.log(`✅ Old invitations cleaned up on startup (${deletedCount} deleted)`);
-    })
-    .catch(err => {
-      console.error('Error cleaning up old invitations:', err.message);
-    });
+  // Wait for database connection before running cleanup
+  const mongoose = require('mongoose');
+  
+  const runCleanup = () => {
+    if (mongoose.connection.readyState === 1) {
+      // Database is connected, run cleanup
+      roomService.cleanupOldInvitationsDirect()
+        .then(deletedCount => {
+          console.log(`✅ Old invitations cleaned up on startup (${deletedCount} deleted)`);
+        })
+        .catch(err => {
+          console.error('Error cleaning up old invitations:', err.message);
+        });
+    } else {
+      // Wait a bit and try again
+      setTimeout(runCleanup, 2000);
+    }
+  };
+
+  // Start cleanup after a short delay to ensure DB connection
+  setTimeout(runCleanup, 3000);
 
   // Schedule to run every 24 hours
   setInterval(() => {
-    roomService.cleanupOldInvitationsDirect()
-      .then(deletedCount => {
-        console.log(`✅ Old invitations cleaned up (${deletedCount} deleted)`);
-      })
-      .catch(err => {
-        console.error('Error cleaning up old invitations:', err.message);
-      });
+    if (mongoose.connection.readyState === 1) {
+      roomService.cleanupOldInvitationsDirect()
+        .then(deletedCount => {
+          console.log(`✅ Old invitations cleaned up (${deletedCount} deleted)`);
+        })
+        .catch(err => {
+          console.error('Error cleaning up old invitations:', err.message);
+        });
+    }
   }, 24 * 60 * 60 * 1000); // 24 hours in milliseconds
 };
   //express app
@@ -50,6 +65,9 @@ const app = express();//اعمل ابكليشن express جديد
 
 // جعل مجلد my_files متاح للوصول العام
 app.use("/my_files", express.static(path.join(__dirname, "my_files")));
+
+// ✅ خدمة الملفات الثابتة من مجلد uploads (لصور المستخدمين)
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Enable CORS for all origins
 app.use(cors());

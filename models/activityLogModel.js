@@ -23,6 +23,8 @@ const activityLogSchema = new mongoose.Schema(
         'file_unstarred',
         'file_shared',
         'file_unshared',
+        'file_accessed_onetime',
+        'file_viewed_by_all_members',
         
         // Folder operations
         'folder_created',
@@ -52,7 +54,7 @@ const activityLogSchema = new mongoose.Schema(
     },
     entityType: {
       type: String,
-      enum: ['file', 'folder', 'user', 'system'],
+      enum: ['file', 'folder', 'user', 'system', 'room'],
       required: true,
     },
     entityId: {
@@ -90,6 +92,9 @@ activityLogSchema.index({ entityType: 1, entityId: 1 });
 
 const ActivityLog = mongoose.model('ActivityLog', activityLogSchema);
 module.exports = ActivityLog;
+
+
+
 
 
 

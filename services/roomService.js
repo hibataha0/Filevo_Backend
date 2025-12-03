@@ -28,15 +28,29 @@ exports.hasPermission = hasPermission;
 
 // Helper function to clean up old invitations
 const cleanupOldInvitations = async () => {
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  
-  const result = await RoomInvitation.deleteMany({
-    status: { $in: ['accepted', 'rejected', 'cancelled'] },
-    respondedAt: { $lt: thirtyDaysAgo }
-  });
-  
-  return result.deletedCount;
+  try {
+    // Check if mongoose is connected
+    const mongoose = require('mongoose');
+    if (mongoose.connection.readyState !== 1) {
+      console.log('Database not connected yet, skipping cleanup');
+      return 0;
+    }
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    const result = await RoomInvitation.deleteMany({
+      status: { $in: ['accepted', 'rejected', 'cancelled'] },
+      respondedAt: { $lt: thirtyDaysAgo }
+    }, {
+      maxTimeMS: 5000 // Set timeout to 5 seconds
+    });
+    
+    return result.deletedCount;
+  } catch (error) {
+    console.error('Error in cleanupOldInvitations:', error.message);
+    return 0; // Return 0 instead of throwing error
+  }
 };
 
 // Export the cleanup function for direct use (without asyncHandler wrapper)
@@ -294,19 +308,44 @@ exports.rejectInvitation = asyncHandler(async (req, res, next) => {
 exports.getMyRooms = asyncHandler(async (req, res, next) => {
   const userId = req.user._id;
 
-  const rooms = await Room.find({
-    'members.user': userId,
-    isActive: true
-  })
-    .populate('owner', 'name email')
-    .populate('members.user', 'name email')
-    .sort({ createdAt: -1 });
+  try {
+    const rooms = await Room.find({
+      'members.user': userId,
+      isActive: true
+    })
+      .select('-files -folders') // Exclude files and folders to reduce data size
+      .populate({
+        path: 'owner',
+        select: 'name email',
+        options: { maxTimeMS: 10000 } // Timeout after 10 seconds
+      })
+      .populate({
+        path: 'members.user',
+        select: 'name email',
+        options: { maxTimeMS: 10000 } // Timeout after 10 seconds
+      })
+      .lean() // Use lean() for better performance
+      .sort({ createdAt: -1 })
+      .maxTimeMS(30000); // Overall timeout 30 seconds
 
-  res.status(200).json({
-    message: "Rooms retrieved successfully",
-    count: rooms.length,
-    rooms: rooms
-  });
+    res.status(200).json({
+      message: "Rooms retrieved successfully",
+      count: rooms.length,
+      rooms: rooms
+    });
+  } catch (error) {
+    console.error('Error in getMyRooms:', error);
+    // If timeout or query error, return empty array instead of crashing
+    if (error.name === 'MongoTimeoutError' || error.message.includes('timeout')) {
+      return res.status(200).json({
+        message: "Rooms retrieved successfully (partial)",
+        count: 0,
+        rooms: [],
+        warning: "Query timeout - please try again"
+      });
+    }
+    throw error;
+  }
 });
 
 // @desc    Get room details
@@ -316,24 +355,93 @@ exports.getRoomDetails = asyncHandler(async (req, res, next) => {
   const roomId = req.params.id;
   const userId = req.user._id;
 
-  const room = await Room.findById(roomId)
-    .populate('owner', 'name email')
-    .populate('members.user', 'name email')
-    .populate('files.fileId')
-    .populate('folders.folderId');
-
-  if (!room) {
+  // First check if user is a member (without loading all data)
+  const roomCheck = await Room.findById(roomId)
+    .select('members')
+    .lean();
+  
+  if (!roomCheck) {
     return next(new ApiError('Room not found', 404));
   }
 
-  // Check if user is a member
-  const isMember = room.members.find(
-    m => m.user._id.toString() === userId.toString()
+  const isMember = roomCheck.members.some(
+    m => m.user.toString() === userId.toString()
   );
   
   if (!isMember) {
     return next(new ApiError('Access denied. You are not a member of this room', 403));
   }
+
+  // Now load full room data with optimized populate
+  // Also clean up one-time shared files that have been accessed
+  const room = await Room.findById(roomId)
+    .populate('owner', 'name email')
+    .populate('members.user', 'name email')
+    .populate({
+      path: 'files.fileId',
+      select: 'name type size category userId createdAt updatedAt', // Only select needed fields
+      populate: {
+        path: 'userId',
+        select: 'name email'
+      }
+    })
+    .populate({
+      path: 'folders.folderId',
+      select: 'name size userId createdAt updatedAt' // Only select needed fields
+    })
+    .lean(); // Use lean() for better performance
+  
+  // No cleanup needed - files stay in room, just hidden from users who accessed them
+
+  if (!room) {
+    return next(new ApiError('Room not found', 404));
+  }
+
+  // Process files: filter for regular users, but show all for file owners (until all members view it)
+  const File = require('../models/fileModel');
+  const processedFiles = [];
+  
+  console.log('🔍 [getRoomDetails] Processing files. Total files in room:', room.files.length);
+  
+  for (const fileEntry of room.files) {
+    // Get file details to check ownership
+    const file = fileEntry.fileId;
+    // Handle both populated and lean() objects
+    const fileUserId = file?.userId?._id?.toString() || file?.userId?.toString() || file?.userId;
+    const isFileOwner = fileUserId === userId.toString();
+    
+    console.log('📄 [getRoomDetails] Processing file:', file?.name || 'unknown', 'isOneTimeShare:', fileEntry.isOneTimeShare, 'isFileOwner:', isFileOwner);
+    
+    // If it's a one-time share
+    if (fileEntry.isOneTimeShare) {
+      // Check if current user has already accessed it
+      if (fileEntry.accessedBy && fileEntry.accessedBy.length > 0) {
+        const userAccessed = fileEntry.accessedBy.some(
+          access => {
+            const accessUserId = access.user?._id?.toString() || access.user?.toString() || access.user;
+            return accessUserId === userId.toString();
+          }
+        );
+        // Hide file if user already accessed it
+        if (userAccessed) {
+          console.log('🚫 [getRoomDetails] User already accessed this one-time file, hiding it');
+          continue; // Skip this file for this user
+        }
+      }
+      
+      // If user hasn't accessed it yet, show it
+      console.log('✅ [getRoomDetails] One-time file not accessed by this user yet, showing it');
+    }
+    
+    // Show the file
+    console.log('✅ [getRoomDetails] Showing file to user');
+    processedFiles.push(fileEntry);
+  }
+  
+  console.log('📊 [getRoomDetails] Processed files count:', processedFiles.length, 'out of', room.files.length);
+
+  // Update room files with processed list
+  room.files = processedFiles;
 
   res.status(200).json({
     message: "Room details retrieved successfully",
@@ -571,6 +679,7 @@ exports.leaveRoom = asyncHandler(async (req, res, next) => {
   });
 });
 
+
 // @desc    Share file with room
 // @route   POST /api/rooms/:id/share-file
 // @access  Private
@@ -622,6 +731,76 @@ exports.shareFileWithRoom = asyncHandler(async (req, res, next) => {
     room: room
   });
 });
+
+// @desc    Share file with room (one-time access)
+// @route   POST /api/rooms/:id/share-file-onetime
+// @access  Private
+exports.shareFileWithRoomOneTime = asyncHandler(async (req, res, next) => {
+  const roomId = req.params.id;
+  const userId = req.user._id;
+  const { fileId, expiresInHours } = req.body;
+
+  console.log('📤 [shareFileWithRoomOneTime] Starting - roomId:', roomId, 'fileId:', fileId, 'userId:', userId);
+
+  if (!fileId) {
+    console.log('❌ [shareFileWithRoomOneTime] File ID is required');
+    return next(new ApiError("File ID is required", 400));
+  }
+
+  const File = require("../models/fileModel");
+  const room = await Room.findById(roomId);
+  if (!room) {
+    console.log('❌ [shareFileWithRoomOneTime] Room not found');
+    return next(new ApiError("Room not found", 404));
+  }
+
+  const isMember = room.members.some(
+    m => m.user.toString() === userId.toString()
+  );
+  if (!isMember) {
+    console.log('❌ [shareFileWithRoomOneTime] User is not a member');
+    return next(new ApiError("You must be a room member to share files", 403));
+  }
+
+  const file = await File.findById(fileId);
+  if (!file) {
+    console.log('❌ [shareFileWithRoomOneTime] File not found');
+    return next(new ApiError("File not found", 404));
+  }
+
+  const alreadyShared = room.files.some(
+    f => f.fileId.toString() === fileId.toString()
+  );
+  if (alreadyShared) {
+    console.log('❌ [shareFileWithRoomOneTime] File already shared with this room');
+    return next(new ApiError("File already shared with this room", 400));
+  }
+
+  const hours = expiresInHours || 24;
+  const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000);
+
+  console.log('✅ [shareFileWithRoomOneTime] Adding file to room with one-time share flag');
+  console.log('📋 [shareFileWithRoomOneTime] Files in room before:', room.files.length);
+  
+  room.files.push({
+    fileId,
+    sharedBy: userId,
+    isOneTimeShare: true,
+    expiresAt,
+    accessedBy: [],  // IMPORTANT
+    accessCount: 0
+  });
+
+  await room.save();
+  console.log('✅ [shareFileWithRoomOneTime] File added successfully. Files in room after:', room.files.length);
+
+  res.status(200).json({
+    message: "File shared (one-time)",
+    expiresAt,
+    room
+  });
+});
+;
 
 // @desc    Share folder with room
 // @route   POST /api/rooms/:id/share-folder
@@ -901,7 +1080,7 @@ exports.getInvitationStats = asyncHandler(async (req, res, next) => {
     message: "Invitation statistics retrieved successfully",
     stats: stats[0]
   });
-});
+})
 
 exports.removeFileFromRoom = asyncHandler(async (req, res, next) => {
   const roomId = req.params.id;
@@ -955,4 +1134,115 @@ exports.removeFileFromRoom = asyncHandler(async (req, res, next) => {
     room: room
   });
 });
+
+// @desc    Access one-time shared file (each user can access once)
+// @route   GET /api/rooms/:id/files/:fileId/access
+// @access  Private
+
+exports.accessOneTimeFile = asyncHandler(async (req, res, next) => {
+  const roomId = req.params.id;
+  const fileId = req.params.fileId;
+  const userId = req.user._id;
+
+  console.log('🔍 [accessOneTimeFile] Starting - roomId:', roomId, 'fileId:', fileId, 'userId:', userId);
+
+  const room = await Room.findById(roomId);
+  if (!room) {
+    console.log('❌ [accessOneTimeFile] Room not found');
+    return next(new ApiError("Room not found", 404));
+  }
+
+  const isMember = room.members.some(m => m.user.toString() === userId.toString());
+  if (!isMember) {
+    console.log('❌ [accessOneTimeFile] User is not a member');
+    return next(new ApiError("You must be a room member", 403));
+  }
+
+  const fileEntry = room.files.find(f => f.fileId.toString() === fileId.toString());
+  if (!fileEntry) {
+    console.log('❌ [accessOneTimeFile] File not found in room. Files count:', room.files.length);
+    return next(new ApiError("File not found in this room", 404));
+  }
+
+  console.log('✅ [accessOneTimeFile] File entry found, isOneTimeShare:', fileEntry.isOneTimeShare);
+
+  // Check expiration
+  if (fileEntry.expiresAt && new Date() > fileEntry.expiresAt) {
+    console.log('⚠️ [accessOneTimeFile] File expired, removing...');
+    room.files = room.files.filter(f => f.fileId.toString() !== fileId);
+    await room.save();
+    return next(new ApiError("File access expired", 410));
+  }
+
+  // One-time file?
+  if (fileEntry.isOneTimeShare) {
+    console.log('📋 [accessOneTimeFile] Processing one-time share file');
+
+    if (!fileEntry.accessedBy) fileEntry.accessedBy = [];
+
+    // Check if user already viewed
+    const alreadyViewed = fileEntry.accessedBy.some(
+      a => a.user.toString() === userId.toString()
+    );
+    if (alreadyViewed) {
+      console.log('❌ [accessOneTimeFile] User already accessed this file');
+      return next(new ApiError("You already accessed this file (one-time)", 403));
+    }
+
+    console.log('✅ [accessOneTimeFile] User can access, adding to accessedBy...');
+    // Add user to accessed list
+    fileEntry.accessedBy.push({ user: userId, accessedAt: new Date() });
+    
+    // Update access count
+    fileEntry.accessCount = (fileEntry.accessCount || 0) + 1;
+    fileEntry.accessedAt = new Date();
+
+    console.log('📊 [accessOneTimeFile] Access count:', fileEntry.accessCount, 'accessedBy length:', fileEntry.accessedBy.length);
+
+    // Fetch the actual file
+    const File = require("../models/fileModel");
+    const file = await File.findById(fileId);
+    if (!file) {
+      console.log('❌ [accessOneTimeFile] File not found in DB');
+      return next(new ApiError("File not found in DB", 404));
+    }
+
+    console.log('💾 [accessOneTimeFile] Saving room with updated accessedBy...');
+    // Save room with updated accessedBy (file stays in room, just marked as accessed)
+    await room.save();
+    console.log('✅ [accessOneTimeFile] Room saved successfully. File remains in room but hidden from this user.');
+
+    // Log activity for current user
+    await logActivity(userId, 'file_accessed_onetime', 'room', roomId, room.name, {
+      fileId: fileId,
+      fileName: file.name
+    }, {
+      ipAddress: req.ip,
+      userAgent: req.get('User-Agent')
+    }).catch(err => {
+      // Don't fail the request if logging fails
+      console.error('Error logging activity:', err);
+    });
+
+    return res.status(200).json({
+      message: "✅ File accessed (one-time share - you can only access this file once)",
+      oneTime: true,
+      hideFromThisUser: true,
+      fileRemovedFromRoom: false, // File stays in room
+      accessCount: fileEntry.accessCount,
+      file
+    });
+  }
+
+  // NORMAL FILE
+  const File = require("../models/fileModel");
+  const file = await File.findById(fileId);
+
+  return res.status(200).json({
+    message: "File accessed",
+    oneTime: false,
+    file
+  });
+});
+
 
