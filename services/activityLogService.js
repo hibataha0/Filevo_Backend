@@ -1,8 +1,46 @@
-const asyncHandler = require('express-async-handler');
-const ActivityLog = require('../models/activityLogModel');
+const asyncHandler = require("express-async-handler");
+const ActivityLog = require("../models/activityLogModel");
+
+// Helper function to keep only last 100 activity logs per user
+const keepLast100Logs = async (userId) => {
+  try {
+    // Count total logs for this user
+    const totalLogs = await ActivityLog.countDocuments({ userId });
+
+    // If more than 100, delete the oldest ones
+    if (totalLogs > 100) {
+      const logsToDelete = totalLogs - 100;
+
+      // Get the oldest logs (sorted by createdAt ascending)
+      const oldestLogs = await ActivityLog.find({ userId })
+        .sort({ createdAt: 1 })
+        .limit(logsToDelete)
+        .select("_id");
+
+      // Delete the oldest logs
+      if (oldestLogs.length > 0) {
+        const idsToDelete = oldestLogs.map((log) => log._id);
+        await ActivityLog.deleteMany({ _id: { $in: idsToDelete } });
+        console.log(
+          `✅ Deleted ${oldestLogs.length} old activity logs for user ${userId}`
+        );
+      }
+    }
+  } catch (error) {
+    console.error("Error cleaning old activity logs:", error);
+  }
+};
 
 // Helper function to log activity
-const logActivity = async (userId, action, entityType, entityId = null, entityName = null, details = {}, metadata = {}) => {
+const logActivity = async (
+  userId,
+  action,
+  entityType,
+  entityId = null,
+  entityName = null,
+  details = {},
+  metadata = {}
+) => {
   try {
     await ActivityLog.create({
       userId,
@@ -13,15 +51,18 @@ const logActivity = async (userId, action, entityType, entityId = null, entityNa
       details,
       metadata: {
         ...metadata,
-        timestamp: new Date()
-      }
+        timestamp: new Date(),
+      },
     });
+
+    // Keep only last 100 logs per user
+    await keepLast100Logs(userId);
   } catch (error) {
-    console.error('Error logging activity:', error);
+    console.error("Error logging activity:", error);
   }
 };
 
-// @desc    Get user activity log
+// @desc    Get user activity log (shows only last 100 logs)
 // @route   GET /api/activity-log
 // @access  Private
 exports.getUserActivityLog = asyncHandler(async (req, res) => {
@@ -29,7 +70,10 @@ exports.getUserActivityLog = asyncHandler(async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 20;
   const skip = (page - 1) * limit;
-  
+
+  // Maximum 100 logs per user
+  const maxLogs = 100;
+
   // Filtering parameters
   const action = req.query.action;
   const entityType = req.query.entityType;
@@ -38,15 +82,15 @@ exports.getUserActivityLog = asyncHandler(async (req, res) => {
 
   // Build query
   const query = { userId };
-  
+
   if (action) {
     query.action = action;
   }
-  
+
   if (entityType) {
     query.entityType = entityType;
   }
-  
+
   if (startDate || endDate) {
     query.createdAt = {};
     if (startDate) {
@@ -57,16 +101,22 @@ exports.getUserActivityLog = asyncHandler(async (req, res) => {
     }
   }
 
-  const activities = await ActivityLog.find(query)
+  // Get only the last 100 logs (most recent), then apply pagination
+  // First, get all logs sorted, then limit to 100, then paginate
+  const allRecentLogs = await ActivityLog.find(query)
     .sort({ createdAt: -1 })
-    .skip(skip)
-    .limit(limit)
-    .populate('userId', 'name email');
+    .limit(maxLogs) // Limit to last 100 logs only
+    .populate("userId", "name email")
+    .lean();
 
-  const totalActivities = await ActivityLog.countDocuments(query);
+  // Apply pagination on the limited results
+  const totalActivities = allRecentLogs.length;
+  const paginatedLogs = allRecentLogs.slice(skip, skip + limit);
+
+  const activities = paginatedLogs;
 
   // Format activities for response
-  const formattedActivities = activities.map(activity => ({
+  const formattedActivities = activities.map((activity) => ({
     _id: activity._id,
     action: activity.action,
     entityType: activity.entityType,
@@ -76,25 +126,25 @@ exports.getUserActivityLog = asyncHandler(async (req, res) => {
     ipAddress: activity.ipAddress,
     userAgent: activity.userAgent,
     createdAt: activity.createdAt,
-    metadata: activity.metadata
+    metadata: activity.metadata,
   }));
 
   res.status(200).json({
-    message: 'Activity log retrieved successfully',
+    message: "Activity log retrieved successfully",
     activities: formattedActivities,
     pagination: {
       currentPage: page,
       totalPages: Math.ceil(totalActivities / limit),
       totalActivities: totalActivities,
       hasNext: page < Math.ceil(totalActivities / limit),
-      hasPrev: page > 1
+      hasPrev: page > 1,
     },
     filters: {
       action,
       entityType,
       startDate,
-      endDate
-    }
+      endDate,
+    },
   });
 });
 
@@ -104,7 +154,7 @@ exports.getUserActivityLog = asyncHandler(async (req, res) => {
 exports.getActivityStatistics = asyncHandler(async (req, res) => {
   const userId = req.user._id;
   const days = parseInt(req.query.days) || 30;
-  
+
   const startDate = new Date();
   startDate.setDate(startDate.getDate() - days);
 
@@ -113,18 +163,18 @@ exports.getActivityStatistics = asyncHandler(async (req, res) => {
     {
       $match: {
         userId: userId,
-        createdAt: { $gte: startDate }
-      }
+        createdAt: { $gte: startDate },
+      },
     },
     {
       $group: {
-        _id: '$action',
-        count: { $sum: 1 }
-      }
+        _id: "$action",
+        count: { $sum: 1 },
+      },
     },
     {
-      $sort: { count: -1 }
-    }
+      $sort: { count: -1 },
+    },
   ]);
 
   // Get activity counts by entity type
@@ -132,18 +182,18 @@ exports.getActivityStatistics = asyncHandler(async (req, res) => {
     {
       $match: {
         userId: userId,
-        createdAt: { $gte: startDate }
-      }
+        createdAt: { $gte: startDate },
+      },
     },
     {
       $group: {
-        _id: '$entityType',
-        count: { $sum: 1 }
-      }
+        _id: "$entityType",
+        count: { $sum: 1 },
+      },
     },
     {
-      $sort: { count: -1 }
-    }
+      $sort: { count: -1 },
+    },
   ]);
 
   // Get daily activity counts
@@ -151,38 +201,38 @@ exports.getActivityStatistics = asyncHandler(async (req, res) => {
     {
       $match: {
         userId: userId,
-        createdAt: { $gte: startDate }
-      }
+        createdAt: { $gte: startDate },
+      },
     },
     {
       $group: {
         _id: {
-          year: { $year: '$createdAt' },
-          month: { $month: '$createdAt' },
-          day: { $dayOfMonth: '$createdAt' }
+          year: { $year: "$createdAt" },
+          month: { $month: "$createdAt" },
+          day: { $dayOfMonth: "$createdAt" },
         },
-        count: { $sum: 1 }
-      }
+        count: { $sum: 1 },
+      },
     },
     {
-      $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 }
-    }
+      $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 },
+    },
   ]);
 
   const totalActivities = await ActivityLog.countDocuments({
     userId: userId,
-    createdAt: { $gte: startDate }
+    createdAt: { $gte: startDate },
   });
 
   res.status(200).json({
-    message: 'Activity statistics retrieved successfully',
+    message: "Activity statistics retrieved successfully",
     statistics: {
       totalActivities,
       period: `${days} days`,
       actionStats,
       entityTypeStats,
-      dailyStats
-    }
+      dailyStats,
+    },
   });
 });
 
@@ -192,39 +242,21 @@ exports.getActivityStatistics = asyncHandler(async (req, res) => {
 exports.clearOldActivityLogs = asyncHandler(async (req, res) => {
   const userId = req.user._id;
   const daysToKeep = parseInt(req.query.days) || 90;
-  
+
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
 
   const result = await ActivityLog.deleteMany({
     userId: userId,
-    createdAt: { $lt: cutoffDate }
+    createdAt: { $lt: cutoffDate },
   });
 
   res.status(200).json({
     message: `✅ ${result.deletedCount} old activity logs cleared successfully`,
     deletedCount: result.deletedCount,
-    cutoffDate: cutoffDate
+    cutoffDate: cutoffDate,
   });
 });
 
 // Export the logActivity function for use in other services
 module.exports.logActivity = logActivity;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

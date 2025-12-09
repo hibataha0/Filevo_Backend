@@ -1,12 +1,12 @@
 const express = require("express");
-const { 
-  createFolder, 
-  uploadFolder, 
-  getFolderContents, 
+const {
+  createFolder,
+  uploadFolder,
+  getFolderContents,
   getAllFolders,
   getAllItems,
   getFolderDetails,
-  getRecentFolders, 
+  getRecentFolders,
   deleteFolder,
   restoreFolder,
   deleteFolderPermanent,
@@ -20,10 +20,13 @@ const {
   unshareFolder,
   getFoldersSharedWithMe,
   getSharedFolderDetailsInRoom,
-  moveFolder
+  moveFolder,
 } = require("../services/folderService");
+const { downloadFolder } = require("../services/fileService");
 const { protect } = require("../services/authService");
-const { uploadFolder: uploadFolderMiddleware } = require("../middlewares/uploadFolderMiddleware");
+const {
+  uploadFolder: uploadFolderMiddleware,
+} = require("../middlewares/uploadFolderMiddleware");
 
 const router = express.Router();
 
@@ -84,6 +87,9 @@ router.delete("/:id", protect, deleteFolder);
 
 // Get folder contents (must be before /:id)
 router.get("/:id/contents", protect, getFolderContents);
+
+// Download folder as zip (must be before /:id)
+router.get("/:id/download", protect, downloadFolder);
 
 // Get folder details
 router.get("/:id", protect, getFolderDetails);

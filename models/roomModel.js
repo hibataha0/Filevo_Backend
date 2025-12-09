@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const roomSchema = new mongoose.Schema(
   {
@@ -30,6 +30,10 @@ const roomSchema = new mongoose.Schema(
           default: "viewer",
           required: true,
         },
+        canShare: {
+          type: Boolean,
+          default: false,
+        },
         joinedAt: {
           type: Date,
           default: Date.now,
@@ -46,14 +50,38 @@ const roomSchema = new mongoose.Schema(
         sharedBy: {
           type: mongoose.Schema.Types.ObjectId,
           ref: "User",
-          required: false, // Not required for old shared files
         },
         sharedAt: {
           type: Date,
           default: Date.now,
         },
+        isOneTimeShare: {
+          type: Boolean,
+          default: false,
+        },
+        expiresAt: Date,
+
+        accessedBy: [
+          {
+            user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+            accessedAt: { type: Date, default: Date.now },
+          },
+        ],
+
+        visibleForOwner: {
+          // ⬅⬅ أهم إضافة
+          type: Boolean,
+          default: true,
+        },
+
+        allMembersViewed: {
+          type: Boolean,
+          default: false,
+        },
+        viewedByAllAt: Date,
       },
     ],
+
     folders: [
       {
         folderId: {
@@ -80,7 +108,10 @@ const roomSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const Room = mongoose.model('Room', roomSchema);
+// Add indexes for better performance
+roomSchema.index({ "members.user": 1, isActive: 1 });
+roomSchema.index({ owner: 1 });
+roomSchema.index({ createdAt: -1 });
+
+const Room = mongoose.model("Room", roomSchema);
 module.exports = Room;
-
-

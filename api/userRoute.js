@@ -1,6 +1,7 @@
 const express = require('express');
 const {
   updateLoggedUserValidator,
+  changeLoggedUserPasswordValidator,
 } = require('../utils/validators/userValidator');
 
 const {
@@ -9,6 +10,11 @@ const {
   updateLoggedUserData,
   deleteLoggedUserData,
 } = require('../services/userService');
+
+const {
+  uploadUserImage,
+  resizeProfileImage,
+} = require('../middlewares/userImageMiddleware');
 
 const authService = require('../services/authService');
 
@@ -19,8 +25,20 @@ router.use(authService.protect);
 
 // Routes للمستخدم الحالي فقط
 router.get('/getMe', getLoggedUserData, updateLoggedUserData); // يمكن استخدام getUser بدلاً من updateLoggedUserData إذا أردت جلب البيانات فقط
-router.put('/changeMyPassword', updateLoggedUserPassword);
-router.put('/updateMe', updateLoggedUserValidator, updateLoggedUserData);
+router.put('/changeMyPassword', changeLoggedUserPasswordValidator, updateLoggedUserPassword);
+router.put(
+  '/updateMe',
+  updateLoggedUserValidator,
+  uploadUserImage,      // ✅ يجب أن يكون هذا أولاً لرفع الصورة
+  resizeProfileImage,         // ✅ ثم هذا لمعالجة الصورة
+  updateLoggedUserData // ✅ ثم هذا لتحديث البيانات
+);
+router.put(
+  '/updateMe/uploadProfileImage',
+  uploadUserImage,
+  resizeProfileImage,
+  updateLoggedUserData
+);
 router.delete('/deleteMe', deleteLoggedUserData);
 
 module.exports = router;

@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const fileSchema = new mongoose.Schema(
   {
@@ -31,7 +31,16 @@ const fileSchema = new mongoose.Schema(
     },
     category: {
       type: String,
-      enum: ["Images", "Videos","Audio", "Documents","Compressed","Applications","Code",  "Others"],
+      enum: [
+        "Images",
+        "Videos",
+        "Audio",
+        "Documents",
+        "Compressed",
+        "Applications",
+        "Code",
+        "Others",
+      ],
       required: true,
     },
     isShared: {
@@ -78,14 +87,47 @@ const fileSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
-    tags: [{
+    tags: [
+      {
+        type: String,
+        trim: true,
+      },
+    ],
+    // ✅ حقول البحث الذكي
+    extractedText: {
       type: String,
-      trim: true,
-    }],
+      default: null,
+      sparse: true,
+    },
+    embedding: {
+      type: [Number],
+      default: null,
+      sparse: true,
+    },
+    summary: {
+      type: String,
+      default: null,
+      sparse: true,
+    },
+    isProcessed: {
+      type: Boolean,
+      default: false,
+    },
+    processedAt: {
+      type: Date,
+      default: null,
+    },
+    textExtractionError: {
+      type: String,
+      default: null,
+    },
+    embeddingError: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
-
-const File = mongoose.model('File', fileSchema);
+const File = mongoose.model("File", fileSchema);
 module.exports = File;

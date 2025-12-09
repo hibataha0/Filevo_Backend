@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const roomInvitationSchema = new mongoose.Schema(
   {
@@ -23,6 +23,10 @@ const roomInvitationSchema = new mongoose.Schema(
       default: "viewer",
       required: true,
     },
+    canShare: {
+      type: Boolean,
+      default: false,
+    },
     message: {
       type: String,
       trim: true,
@@ -44,21 +48,5 @@ const roomInvitationSchema = new mongoose.Schema(
 // Index to ensure one pending invitation per room-user pair
 roomInvitationSchema.index({ room: 1, receiver: 1, status: 1 });
 
-const RoomInvitation = mongoose.model('RoomInvitation', roomInvitationSchema);
+const RoomInvitation = mongoose.model("RoomInvitation", roomInvitationSchema);
 module.exports = RoomInvitation;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -1,10 +1,10 @@
 const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
-const { 
-  uploadSingleFile, 
-  uploadMultipleFiles, 
-  getFilesByCategory, 
+const {
+  uploadSingleFile,
+  uploadMultipleFiles,
+  getFilesByCategory,
   getFileDetails,
   getAllFiles,
   getRecentFiles,
@@ -24,12 +24,14 @@ const {
   getSharedFileDetailsInRoom,
   getCategoriesStats,
   moveFile,
-  getRootCategoriesStats
+  getRootCategoriesStats,
+  downloadFile,
+  downloadFolder,
 } = require("../services/fileService");
 const { protect } = require("../services/authService");
-const { 
-  uploadSingleFile: uploadSingleFileMiddleware, 
-  uploadMultipleFiles: uploadMultipleFilesMiddleware 
+const {
+  uploadSingleFile: uploadSingleFileMiddleware,
+  uploadMultipleFiles: uploadMultipleFilesMiddleware,
 } = require("../middlewares/uploadFilesMiddleware");
 
 const router = express.Router();
@@ -50,10 +52,20 @@ const upload = multer({ storage });
 // ===== FILE ROUTES =====
 
 // Upload single file
-router.post("/upload-single", protect, uploadSingleFileMiddleware, uploadSingleFile);
+router.post(
+  "/upload-single",
+  protect,
+  uploadSingleFileMiddleware,
+  uploadSingleFile
+);
 
 // Upload multiple files
-router.post("/upload-multiple", protect, uploadMultipleFilesMiddleware, uploadMultipleFiles);
+router.post(
+  "/upload-multiple",
+  protect,
+  uploadMultipleFilesMiddleware,
+  uploadMultipleFiles
+);
 
 // Get all files for user
 router.get("/", protect, getAllFiles);
@@ -108,8 +120,11 @@ router.put("/:id", protect, updateFile);
 // Delete file (move to trash)
 router.delete("/:id", protect, deleteFile);
 
+// Download file (must be before /:id)
+router.get("/:id/download", protect, downloadFile);
+
 // Get file details
 router.get("/:id", protect, getFileDetails);
-router.get("/categories/stats/root",protect,getRootCategoriesStats);
+router.get("/categories/stats/root", protect, getRootCategoriesStats);
 
 module.exports = router;
