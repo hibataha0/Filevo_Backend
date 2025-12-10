@@ -19,12 +19,8 @@ const {
   updateFolderPermissions,
   unshareFolder,
   getFoldersSharedWithMe,
-<<<<<<< HEAD
   getSharedFolderDetailsInRoom,
   moveFolder,
-=======
-  getSharedFolderDetailsInRoom
->>>>>>> 860a30c53b40f831c172f90d8f1e93a908165e64
 } = require("../services/folderService");
 const { downloadFolder } = require("../services/fileService");
 const { protect } = require("../services/authService");
@@ -94,6 +90,5 @@ router.get("/:id/download", protect, downloadFolder);
 
 // Get folder details
 router.get("/:id", protect, getFolderDetails);
-
 
 module.exports = router;
