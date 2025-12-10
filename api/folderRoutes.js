@@ -19,8 +19,12 @@ const {
   updateFolderPermissions,
   unshareFolder,
   getFoldersSharedWithMe,
+<<<<<<< HEAD
   getSharedFolderDetailsInRoom,
   moveFolder,
+=======
+  getSharedFolderDetailsInRoom
+>>>>>>> 860a30c53b40f831c172f90d8f1e93a908165e64
 } = require("../services/folderService");
 const { downloadFolder } = require("../services/fileService");
 const { protect } = require("../services/authService");
@@ -71,9 +75,6 @@ router.delete("/:id/permanent", protect, deleteFolderPermanent);
 // Toggle star folder (must be before /:id)
 router.put("/:id/star", protect, toggleStarFolder);
 
-// Move folder to another folder (must be before /:id)
-router.put("/:id/move", protect, moveFolder);
-
 // Folder sharing routes (must be before /:id)
 router.post("/:id/share", protect, shareFolder);
 router.put("/:id/share", protect, updateFolderPermissions);
@@ -93,5 +94,6 @@ router.get("/:id/download", protect, downloadFolder);
 
 // Get folder details
 router.get("/:id", protect, getFolderDetails);
+
 
 module.exports = router;

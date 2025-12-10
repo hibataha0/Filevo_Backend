@@ -260,3 +260,27 @@ exports.clearOldActivityLogs = asyncHandler(async (req, res) => {
 
 // Export the logActivity function for use in other services
 module.exports.logActivity = logActivity;
+<<<<<<< HEAD
+=======
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+>>>>>>> 860a30c53b40f831c172f90d8f1e93a908165e64
