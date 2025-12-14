@@ -13,16 +13,167 @@ const sendEmail = require("../utils/sendEmail");
 // @access  Public
 
 exports.registerUser = asyncHandler(async (req, res, next) => {
+  // ✅ إنشاء المستخدم مع emailVerified = false
   const user = await User.create({
     name: req.body.name,
     email: req.body.email,
     password: req.body.password,
+    emailVerified: false, // ✅ الحساب غير مفعّل حتى الآن
   });
 
-  // 2- Generate token
+  // ✅ توليد كود تحقق من 6 أرقام
+  const verificationCode = Math.floor(
+    100000 + Math.random() * 900000
+  ).toString();
+  const hashedVerificationCode = crypto
+    .createHash("sha256")
+    .update(verificationCode)
+    .digest("hex");
+
+  // ✅ حفظ كود التحقق في قاعدة البيانات
+  user.emailVerificationCode = hashedVerificationCode;
+  // ✅ انتهاء صلاحية الكود بعد 10 دقائق
+  user.emailVerificationExpires = Date.now() + 10 * 60 * 1000;
+
+  await user.save();
+
+  // ✅ إرسال كود التحقق عبر البريد الإلكتروني
+  const message = `مرحباً ${user.name},\n\nشكراً لك على التسجيل في Filevo!\n\nكود التحقق من البريد الإلكتروني الخاص بك هو:\n${verificationCode}\n\nهذا الكود صالح لمدة 10 دقائق.\n\nإذا لم تطلب هذا الكود، يمكنك تجاهل هذه الرسالة.\n\nشكراً لك،\nفريق Filevo`;
+
+  try {
+    await sendEmail({
+      email: user.email,
+      subject: "كود التحقق من البريد الإلكتروني - Filevo",
+      message,
+    });
+  } catch (err) {
+    // ✅ في حالة فشل إرسال البريد، حذف الكود
+    user.emailVerificationCode = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save();
+    return next(new ApiError("حدث خطأ في إرسال البريد الإلكتروني", 500));
+  }
+
+  // ✅ إرجاع رسالة نجاح بدون token (لأن الحساب غير مفعّل)
+  res.status(201).json({
+    success: true,
+    message:
+      "تم إنشاء الحساب بنجاح. يرجى التحقق من بريدك الإلكتروني لإدخال كود التحقق",
+    userId: user._id,
+    email: user.email,
+  });
+});
+
+// @desc    Verify email verification code
+// @route   POST /api/v1/auth/verifyEmail
+// @access  Public
+exports.verifyEmailCode = asyncHandler(async (req, res, next) => {
+  const { email, verificationCode } = req.body;
+
+  // ✅ التحقق من وجود البيانات المطلوبة
+  if (!email || !verificationCode) {
+    return next(new ApiError("البريد الإلكتروني وكود التحقق مطلوبان", 400));
+  }
+
+  // ✅ تحويل كود التحقق إلى hash
+  const hashedVerificationCode = crypto
+    .createHash("sha256")
+    .update(verificationCode)
+    .digest("hex");
+
+  // ✅ البحث عن المستخدم بالبريد الإلكتروني وكود التحقق
+  const user = await User.findOne({
+    email: email.toLowerCase(),
+    emailVerificationCode: hashedVerificationCode,
+    emailVerificationExpires: { $gt: Date.now() },
+  });
+
+  if (!user) {
+    return next(new ApiError("كود التحقق غير صحيح أو منتهي الصلاحية", 400));
+  }
+
+  // ✅ تفعيل الحساب
+  user.emailVerified = true;
+  user.emailVerificationCode = undefined;
+  user.emailVerificationExpires = undefined;
+  await user.save();
+
+  // ✅ توليد token بعد تفعيل الحساب
   const token = createToken(user._id);
 
-  res.status(201).json({ data: user, token });
+  // ✅ حذف كلمة المرور من الاستجابة
+  delete user._doc.password;
+  delete user._doc.emailVerificationCode;
+
+  // ✅ تحويل profileImg إلى URL كامل
+  const { transformUserProfileImage } = require("../utils/profileImageHelper");
+  const userWithProfileUrl = transformUserProfileImage(user, req);
+
+  res.status(200).json({
+    success: true,
+    message: "تم تفعيل الحساب بنجاح",
+    data: userWithProfileUrl,
+    token,
+  });
+});
+
+// @desc    Resend email verification code
+// @route   POST /api/v1/auth/resendVerificationCode
+// @access  Public
+exports.resendVerificationCode = asyncHandler(async (req, res, next) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return next(new ApiError("البريد الإلكتروني مطلوب", 400));
+  }
+
+  // ✅ البحث عن المستخدم
+  const user = await User.findOne({ email: email.toLowerCase() });
+
+  if (!user) {
+    return next(new ApiError("المستخدم غير موجود", 404));
+  }
+
+  // ✅ التحقق من أن الحساب غير مفعّل بالفعل
+  if (user.emailVerified) {
+    return next(new ApiError("الحساب مفعّل بالفعل", 400));
+  }
+
+  // ✅ توليد كود تحقق جديد
+  const verificationCode = Math.floor(
+    100000 + Math.random() * 900000
+  ).toString();
+  const hashedVerificationCode = crypto
+    .createHash("sha256")
+    .update(verificationCode)
+    .digest("hex");
+
+  // ✅ حفظ كود التحقق الجديد
+  user.emailVerificationCode = hashedVerificationCode;
+  user.emailVerificationExpires = Date.now() + 10 * 60 * 1000; // 10 دقائق
+  await user.save();
+
+  // ✅ إرسال كود التحقق عبر البريد الإلكتروني
+  const message = `مرحباً ${user.name},\n\nكود التحقق من البريد الإلكتروني الخاص بك هو:\n${verificationCode}\n\nهذا الكود صالح لمدة 10 دقائق.\n\nإذا لم تطلب هذا الكود، يمكنك تجاهل هذه الرسالة.\n\nشكراً لك،\nفريق Filevo`;
+
+  try {
+    await sendEmail({
+      email: user.email,
+      subject: "كود التحقق من البريد الإلكتروني - Filevo",
+      message,
+    });
+  } catch (err) {
+    // ✅ في حالة فشل إرسال البريد، حذف الكود
+    user.emailVerificationCode = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save();
+    return next(new ApiError("حدث خطأ في إرسال البريد الإلكتروني", 500));
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "تم إرسال كود التحقق إلى بريدك الإلكتروني",
+  });
 });
 
 // @desc    Login
@@ -34,15 +185,66 @@ exports.login = asyncHandler(async (req, res, next) => {
   const user = await User.findOne({ email: req.body.email });
 
   if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
-    return next(new ApiError("Incorrect email or password", 401));
+    return next(
+      new ApiError("البريد الإلكتروني أو كلمة المرور غير صحيحة", 401)
+    );
   }
+
+  // ✅ التحقق من أن البريد الإلكتروني مفعّل
+  if (!user.emailVerified) {
+    // ✅ إذا كان الحساب غير مفعّل، إرسال كود التحقق تلقائياً
+    const verificationCode = Math.floor(
+      100000 + Math.random() * 900000
+    ).toString();
+    const hashedVerificationCode = crypto
+      .createHash("sha256")
+      .update(verificationCode)
+      .digest("hex");
+
+    // ✅ حفظ كود التحقق في قاعدة البيانات
+    user.emailVerificationCode = hashedVerificationCode;
+    user.emailVerificationExpires = Date.now() + 10 * 60 * 1000; // 10 دقائق
+    await user.save();
+
+    // ✅ إرسال كود التحقق عبر البريد الإلكتروني
+    const message = `مرحباً ${user.name},\n\nتم محاولة تسجيل الدخول إلى حسابك في Filevo.\n\nكود التحقق من البريد الإلكتروني الخاص بك هو:\n${verificationCode}\n\nهذا الكود صالح لمدة 10 دقائق.\n\nيرجى إدخال هذا الكود لتفعيل حسابك وتسجيل الدخول.\n\nإذا لم تطلب هذا الكود، يمكنك تجاهل هذه الرسالة.\n\nشكراً لك،\nفريق Filevo`;
+
+    try {
+      await sendEmail({
+        email: user.email,
+        subject: "كود التحقق من البريد الإلكتروني - Filevo",
+        message,
+      });
+    } catch (err) {
+      // ✅ في حالة فشل إرسال البريد، حذف الكود
+      user.emailVerificationCode = undefined;
+      user.emailVerificationExpires = undefined;
+      await user.save();
+      return next(new ApiError("حدث خطأ في إرسال البريد الإلكتروني", 500));
+    }
+
+    // ✅ إرجاع رسالة تخبر المستخدم أنه تم إرسال الكود
+    return res.status(403).json({
+      success: false,
+      message:
+        "يرجى تفعيل حسابك أولاً. تم إرسال كود التحقق إلى بريدك الإلكتروني",
+      email: user.email,
+      requiresVerification: true,
+    });
+  }
+
   // 3) generate token
   const token = createToken(user._id);
 
   // Delete password from response
   delete user._doc.password;
+
+  // ✅ تحويل profileImg إلى URL كامل
+  const { transformUserProfileImage } = require("../utils/profileImageHelper");
+  const userWithProfileUrl = transformUserProfileImage(user, req);
+
   // 4) send response to client side
-  res.status(200).json({ data: user, token });
+  res.status(200).json({ data: userWithProfileUrl, token });
 });
 
 // @desc   make sure the user is logged in
@@ -71,11 +273,11 @@ exports.protect = asyncHandler(async (req, res, next) => {
   } catch (err) {
     if (err.name === "TokenExpiredError") {
       return next(new ApiError("Token expired. Please login again", 401));
-    } else if (err.name === "JsonWebTokenError") {
-      return next(new ApiError("Invalid token. Please login again", 401));
-    } else {
-      return next(new ApiError("Cannot identify user. Please re-login", 401));
     }
+    if (err.name === "JsonWebTokenError") {
+      return next(new ApiError("Invalid token. Please login again", 401));
+    }
+    return next(new ApiError("Cannot identify user. Please re-login", 401));
   }
 
   // 3) Check if user exists

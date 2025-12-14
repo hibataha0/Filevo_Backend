@@ -58,7 +58,15 @@ router.post(
   protect,
   asyncHandler(async (req, res) => {
     const userId = req.user._id;
-    const { query, limit = 20, minScore = 0.2, category = null } = req.body;
+    const {
+      query,
+      limit = 20,
+      minScore = 0.2,
+      category = null,
+      dateRange = null, // 'yesterday', 'last7days', 'last30days', 'lastyear', 'custom'
+      startDate = null, // للـ custom date range (ISO string)
+      endDate = null, // للـ custom date range (ISO string)
+    } = req.body;
 
     if (!query || query.trim().length === 0) {
       return res.status(400).json({
@@ -70,6 +78,9 @@ router.post(
       limit: parseInt(limit, 10),
       minScore: parseFloat(minScore),
       category,
+      dateRange,
+      startDate: startDate ? new Date(startDate) : null,
+      endDate: endDate ? new Date(endDate) : null,
     });
 
     res.status(200).json({
@@ -90,6 +101,10 @@ router.post(
         hasExtractedText: !!r.item.extractedText,
         createdAt: r.item.createdAt,
         updatedAt: r.item.updatedAt,
+        // إضافة URLs للفتح والتحميل
+        viewUrl: `/api/v1/files/${r.item._id}/view`, // للفتح المباشر (صور، PDF، فيديو، صوت، نص)
+        downloadUrl: `/api/v1/files/${r.item._id}/download`, // للتحميل
+        detailsUrl: `/api/v1/files/${r.item._id}`, // للتفاصيل (JSON)
       })),
     });
   })

@@ -1,17 +1,93 @@
 const File = require("../models/fileModel");
-const Folder = require("../models/folderModel");
-const {
-  generateEmbedding,
-  cosineSimilarity,
-  combineFileDataForSearch,
-} = require("./aiService");
+const { generateEmbedding, cosineSimilarity } = require("./aiService");
+
+/**
+ * بناء فلتر التاريخ حسب النطاق المحدد
+ * @param {string} dateRange - 'yesterday', 'last7days', 'last30days', 'lastyear', 'custom'
+ * @param {Date|string} startDate - تاريخ البداية (للـ custom)
+ * @param {Date|string} endDate - تاريخ النهاية (للـ custom)
+ * @returns {Object|null} - MongoDB date filter أو null
+ */
+function buildDateFilter(dateRange, startDate, endDate) {
+  if (!dateRange || dateRange === "all") {
+    return null;
+  }
+
+  const now = new Date();
+  let start = null;
+  const end = new Date(); // الآن
+
+  switch (dateRange) {
+    case "yesterday": {
+      const yesterdayStart = new Date(now);
+      yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+      yesterdayStart.setHours(0, 0, 0, 0);
+      const yesterdayEnd = new Date(now);
+      yesterdayEnd.setDate(yesterdayEnd.getDate() - 1);
+      yesterdayEnd.setHours(23, 59, 59, 999);
+      return {
+        $gte: yesterdayStart,
+        $lte: yesterdayEnd,
+      };
+    }
+    case "last7days": {
+      start = new Date(now);
+      start.setDate(start.getDate() - 7);
+      start.setHours(0, 0, 0, 0);
+      break;
+    }
+    case "last30days": {
+      start = new Date(now);
+      start.setDate(start.getDate() - 30);
+      start.setHours(0, 0, 0, 0);
+      break;
+    }
+    case "lastyear": {
+      start = new Date(now);
+      start.setFullYear(start.getFullYear() - 1);
+      start.setHours(0, 0, 0, 0);
+      break;
+    }
+    case "custom": {
+      if (startDate && endDate) {
+        start = new Date(startDate);
+        const customEnd = new Date(endDate);
+        customEnd.setHours(23, 59, 59, 999);
+        return {
+          $gte: start,
+          $lte: customEnd,
+        };
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+
+  if (!start) {
+    return null;
+  }
+
+  return {
+    $gte: start,
+    $lte: end,
+  };
+}
 
 /**
  * البحث الذكي الشامل: نصي + AI
  * يبحث في: اسم الملف، الوصف، الوسوم، محتوى الملف (extractedText)
+ * يدعم الفلترة حسب: التصنيف والتاريخ
  */
 async function smartSearch(userId, query, options = {}) {
-  const { limit = 20, minScore = 0.2, category = null } = options;
+  const {
+    limit = 20,
+    minScore = 0.2,
+    category = null,
+    dateRange = null, // 'yesterday', 'last7days', 'last30days', 'lastyear', 'custom'
+    startDate = null, // للـ custom date range
+    endDate = null, // للـ custom date range
+  } = options;
 
   try {
     console.log(`🔍 Smart Search: "${query}" for user ${userId}`);
@@ -22,6 +98,9 @@ async function smartSearch(userId, query, options = {}) {
       "i"
     );
 
+    // بناء query التاريخ
+    const dateFilter = buildDateFilter(dateRange, startDate, endDate);
+
     const textQuery = {
       userId,
       isDeleted: false,
@@ -30,11 +109,28 @@ async function smartSearch(userId, query, options = {}) {
         { description: textSearchRegex },
         { tags: { $in: [textSearchRegex] } },
         { extractedText: textSearchRegex },
+        // البحث في بيانات الصور
+        { imageDescription: textSearchRegex },
+        { imageScene: textSearchRegex },
+        { imageObjects: { $in: [textSearchRegex] } },
+        { imageText: textSearchRegex },
+        // البحث في بيانات الصوت
+        { audioTranscript: textSearchRegex },
+        // البحث في بيانات الفيديو
+        { videoTranscript: textSearchRegex },
+        { videoDescription: textSearchRegex },
+        { videoScenes: { $in: [textSearchRegex] } },
       ],
     };
 
-    if (category && category !== "all") {
+    // فلترة حسب التصنيف
+    if (category && category !== "all" && category !== null) {
       textQuery.category = category;
+    }
+
+    // فلترة حسب التاريخ
+    if (dateFilter) {
+      textQuery.createdAt = dateFilter;
     }
 
     const textFiles = await File.find(textQuery)
@@ -44,30 +140,36 @@ async function smartSearch(userId, query, options = {}) {
     console.log(`Found ${textFiles.length} files via text search`);
 
     // 2. إذا كان هناك ملفات مع embeddings، استخدم AI للبحث الدلالي
-    let aiResults = [];
+    const aiResults = [];
 
     try {
       const queryEmbedding = await generateEmbedding(query);
 
-      const filesWithEmbeddings = await File.find({
+      const aiQuery = {
         userId,
         isDeleted: false,
         embedding: { $exists: true, $ne: null },
         isProcessed: true,
-      }).lean();
+      };
 
-      if (category && category !== "all") {
-        filesWithEmbeddings = filesWithEmbeddings.filter(
-          (f) => f.category === category
-        );
+      // تطبيق فلترة التصنيف على AI search
+      if (category && category !== "all" && category !== null) {
+        aiQuery.category = category;
       }
+
+      // تطبيق فلترة التاريخ على AI search
+      if (dateFilter) {
+        aiQuery.createdAt = dateFilter;
+      }
+
+      const filesWithEmbeddings = await File.find(aiQuery).lean();
 
       console.log(`Found ${filesWithEmbeddings.length} files with embeddings`);
 
       // حساب التشابه لكل ملف
-      for (const file of filesWithEmbeddings) {
+      filesWithEmbeddings.forEach((file) => {
         if (!file.embedding || file.embedding.length === 0) {
-          continue;
+          return;
         }
 
         const similarity = cosineSimilarity(queryEmbedding, file.embedding);
@@ -80,7 +182,7 @@ async function smartSearch(userId, query, options = {}) {
             searchType: "ai",
           });
         }
-      }
+      });
 
       // ترتيب نتائج AI
       aiResults.sort((a, b) => b.score - a.score);
@@ -212,4 +314,3 @@ module.exports = {
   searchInFileContent,
   searchByFileName,
 };
-

@@ -11,7 +11,12 @@ exports.getLoggedUserData = asyncHandler(async (req, res, next) => {
   if (!user) {
     return res.status(404).json({ message: 'User not found' });
   }
-  res.status(200).json({ data: user });
+  
+  // ✅ تحويل profileImg إلى URL كامل
+  const { transformUserProfileImage } = require('../utils/profileImageHelper');
+  const userWithProfileUrl = transformUserProfileImage(user, req);
+  
+  res.status(200).json({ data: userWithProfileUrl });
 });
 
 // @desc    Update logged user password
@@ -25,25 +30,50 @@ exports.updateLoggedUserPassword = asyncHandler(async (req, res, next) => {
   user.passwordChangedAt = Date.now();
   await user.save();
 
+  // ✅ تحويل profileImg إلى URL كامل
+  const { transformUserProfileImage } = require('../utils/profileImageHelper');
+  const userWithProfileUrl = transformUserProfileImage(user, req);
+
   const token = createToken(user._id);
-  res.status(200).json({ data: user, token });
+  res.status(200).json({ data: userWithProfileUrl, token });
 });
 
 // @desc    Update logged user data
 // @route   PUT /api/v1/users/updateMe
 // @access  Private
 exports.updateLoggedUserData = asyncHandler(async (req, res, next) => {
+  // ✅ بناء update object مع جميع الحقول المتاحة
+  const updateData = {};
+  
+  if (req.body.name !== undefined) {
+    updateData.name = req.body.name;
+  }
+  if (req.body.email !== undefined) {
+    updateData.email = req.body.email;
+  }
+  if (req.body.phone !== undefined) {
+    updateData.phone = req.body.phone;
+  }
+  // ✅ إضافة profileImg إذا كان موجوداً في req.body (بعد معالجة الصورة)
+  if (req.body.profileImg !== undefined) {
+    updateData.profileImg = req.body.profileImg;
+  }
+
   const updatedUser = await User.findByIdAndUpdate(
     req.user._id,
-    {
-      name: req.body.name,
-      email: req.body.email,
-      phone: req.body.phone,
-    },
-    { new: true }
+    updateData,
+    { new: true, runValidators: true }
   );
 
-  res.status(200).json({ data: updatedUser });
+  if (!updatedUser) {
+    return next(new ApiError('User not found', 404));
+  }
+
+  // ✅ تحويل profileImg إلى URL كامل
+  const { transformUserProfileImage } = require('../utils/profileImageHelper');
+  const userWithProfileUrl = transformUserProfileImage(updatedUser, req);
+
+  res.status(200).json({ data: userWithProfileUrl });
 });
 
 // @desc    Delete logged user permanently

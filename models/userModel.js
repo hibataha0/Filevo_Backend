@@ -30,6 +30,13 @@ const userSchema = new mongoose.Schema(
     passwordResetExpires: Date,
     passwordResetVerified: Boolean,
     lastPasswordResetEmail: String, // 🔹 نخزن فيه الإيميل مؤقتًا
+    // ✅ حقول التحقق من البريد الإلكتروني
+    emailVerificationCode: String,
+    emailVerificationExpires: Date,
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
     profileImg: String, // صورة الملف الشخصي
   },
   { timestamps: true }

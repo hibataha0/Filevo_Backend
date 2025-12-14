@@ -8,9 +8,8 @@ const cors = require("cors");
 const morgan = require("morgan");
 const helmet = require("helmet"); // حماية الـ headers
 const rateLimit = require("express-rate-limit"); // حماية من الهجمات
-const mongoSanitize = require("express-mongo-sanitize"); // NoSQL Injection
-const xss = require("xss-clean"); // XSS protection
 const path = require("path");
+const mongoSanitize = require("./middlewares/mongoSanitize"); // NoSQL Injection (Express 5 compatible)
 
 const ApiError = require("./utils/apiError");
 const authRoutes = require("./api/authRoutes");
@@ -35,6 +34,18 @@ const app = express();
 // 🔐 SECURITY MIDDLEWARES
 // ======================
 
+// Body parser - يجب أن يكون أول middleware
+app.use(express.json({ limit: "10kb" })); // limit payload to 10kb
+app.use(express.urlencoded({ extended: true })); // للـ form data
+
+// CORS: only allow frontend domain(s)
+app.use(
+  cors({
+    origin: [process.env.FRONTEND_URL || "http://localhost:3000"],
+    credentials: true,
+  })
+);
+
 // Helmet for basic security headers
 app.use(helmet());
 
@@ -46,22 +57,9 @@ const limiter = rateLimit({
 });
 app.use("/api", limiter);
 
-// Body parser
-app.use(express.json({ limit: "10kb" })); // limit payload to 10kb
-
 // Data sanitization against NoSQL query injection
+// يجب أن يكون بعد body parser
 app.use(mongoSanitize());
-
-// Data sanitization against XSS
-app.use(xss());
-
-// CORS: only allow frontend domain(s)
-app.use(
-  cors({
-    origin: [process.env.FRONTEND_URL || "http://localhost:3000"],
-    credentials: true,
-  })
-);
 
 // Logging only in development
 if (process.env.NODE_ENV === "development") {
@@ -120,6 +118,7 @@ const checkHFOnStartup = () => {
 };
 
 const scheduleInvitationCleanup = () => {
+  // eslint-disable-next-line global-require
   const mongoose = require("mongoose");
 
   const runCleanup = () => {

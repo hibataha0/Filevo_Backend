@@ -8,13 +8,20 @@ const { registerUser,
         login, 
         forgotPassword,
         verifyPassResetCode,
-        resetPassword} = require('../services/authService');
+        resetPassword,
+        verifyEmailCode,
+        resendVerificationCode} = require('../services/authService');
 
 
 const router = express.Router();
 
 // 🔹 Signup route
 router.post('/registerUser',signupValidator, registerUser);
+
+// ✅ Email verification routes
+router.post('/verifyEmail', verifyEmailCode);
+router.post('/resendVerificationCode', resendVerificationCode);
+
 router.post('/login', loginValidator, login);
 router.post('/forgotPassword', forgotPassword);
 router.post('/verifyResetCode', verifyPassResetCode);

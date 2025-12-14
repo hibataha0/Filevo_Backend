@@ -125,6 +125,56 @@ const fileSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    // ✅ حقول بيانات الصور
+    imageDescription: {
+      type: String,
+      default: null,
+      sparse: true,
+    },
+    imageObjects: {
+      type: [String],
+      default: [],
+    },
+    imageScene: {
+      type: String,
+      default: null,
+      sparse: true,
+    },
+    imageColors: {
+      type: [String],
+      default: [],
+    },
+    imageMood: {
+      type: String,
+      default: null,
+      sparse: true,
+    },
+    imageText: {
+      type: String,
+      default: null,
+      sparse: true,
+    },
+    // ✅ حقول بيانات الصوت
+    audioTranscript: {
+      type: String,
+      default: null,
+      sparse: true,
+    },
+    // ✅ حقول بيانات الفيديو
+    videoTranscript: {
+      type: String,
+      default: null,
+      sparse: true,
+    },
+    videoScenes: {
+      type: [String],
+      default: [],
+    },
+    videoDescription: {
+      type: String,
+      default: null,
+      sparse: true,
+    },
   },
   { timestamps: true }
 );

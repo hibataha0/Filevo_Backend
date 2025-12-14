@@ -4,6 +4,7 @@ const RoomInvitation = require("../models/roomInvitationModel");
 const User = require("../models/userModel");
 const ApiError = require("../utils/apiError");
 const { logActivity } = require("./activityLogService");
+const { transformUserProfileImage } = require("../utils/profileImageHelper");
 
 // Helper function to get permissions based on role
 const getPermissionsFromRole = (role) => {
@@ -155,8 +156,21 @@ exports.updateRoom = asyncHandler(async (req, res, next) => {
   await room.save();
 
   // Populate owner and members for response
-  await room.populate("owner", "name email");
-  await room.populate("members.user", "name email");
+  await room.populate("owner", "name email profileImg");
+  await room.populate("members.user", "name email profileImg");
+
+  // Transform profile images to full URLs
+  if (room.owner) {
+    room.owner = transformUserProfileImage(room.owner, req);
+  }
+  if (room.members && room.members.length > 0) {
+    room.members = room.members.map((member) => ({
+      ...member.toObject(),
+      user: member.user
+        ? transformUserProfileImage(member.user, req)
+        : member.user,
+    }));
+  }
 
   // Log activity
   await logActivity(
@@ -278,8 +292,8 @@ exports.sendInvitation = asyncHandler(async (req, res, next) => {
     status: "pending",
   });
 
-  await invitation.populate("receiver", "name email");
-  await invitation.populate("sender", "name email");
+  await invitation.populate("receiver", "name email profileImg");
+  await invitation.populate("sender", "name email profileImg");
 
   // Log activity
   await logActivity(
@@ -315,11 +329,19 @@ exports.acceptInvitation = asyncHandler(async (req, res, next) => {
   // Find invitation
   const invitation = await RoomInvitation.findById(invitationId)
     .populate("room")
-    .populate("sender", "name email")
-    .populate("receiver", "name email");
+    .populate("sender", "name email profileImg")
+    .populate("receiver", "name email profileImg");
 
   if (!invitation) {
     return next(new ApiError("Invitation not found", 404));
+  }
+
+  // Transform profile images to full URLs
+  if (invitation.sender) {
+    invitation.sender = transformUserProfileImage(invitation.sender, req);
+  }
+  if (invitation.receiver) {
+    invitation.receiver = transformUserProfileImage(invitation.receiver, req);
   }
 
   // Check if invitation is for current user
@@ -382,12 +404,20 @@ exports.rejectInvitation = asyncHandler(async (req, res, next) => {
 
   // Find invitation
   const invitation = await RoomInvitation.findById(invitationId)
-    .populate("sender", "name email")
-    .populate("receiver", "name email")
+    .populate("sender", "name email profileImg")
+    .populate("receiver", "name email profileImg")
     .populate("room");
 
   if (!invitation) {
     return next(new ApiError("Invitation not found", 404));
+  }
+
+  // Transform profile images to full URLs
+  if (invitation.sender) {
+    invitation.sender = transformUserProfileImage(invitation.sender, req);
+  }
+  if (invitation.receiver) {
+    invitation.receiver = transformUserProfileImage(invitation.receiver, req);
   }
 
   // Check if invitation is for current user
@@ -441,12 +471,12 @@ exports.getMyRooms = asyncHandler(async (req, res, next) => {
       ) // ✅ إضافة files و folders للحصول على العدد
       .populate({
         path: "owner",
-        select: "name email",
+        select: "name email profileImg",
         options: { maxTimeMS: 10000 },
       })
       .populate({
         path: "members.user",
-        select: "name email",
+        select: "name email profileImg",
         options: { maxTimeMS: 10000 },
       })
       .lean()
@@ -468,10 +498,29 @@ exports.getMyRooms = asyncHandler(async (req, res, next) => {
       };
     });
 
+    // Transform profile images to full URLs for all rooms
+    const roomsWithProfileImages = roomsWithCounts.map((room) => {
+      const transformedRoom = { ...room };
+
+      if (room.owner) {
+        transformedRoom.owner = transformUserProfileImage(room.owner, req);
+      }
+      if (room.members && room.members.length > 0) {
+        transformedRoom.members = room.members.map((member) => ({
+          ...member,
+          user: member.user
+            ? transformUserProfileImage(member.user, req)
+            : member.user,
+        }));
+      }
+
+      return transformedRoom;
+    });
+
     res.status(200).json({
       message: "Rooms retrieved successfully",
-      count: roomsWithCounts.length,
-      rooms: roomsWithCounts,
+      count: roomsWithProfileImages.length,
+      rooms: roomsWithProfileImages,
     });
   } catch (error) {
     console.error("Error in getMyRooms:", error);
@@ -517,15 +566,15 @@ exports.getRoomDetails = asyncHandler(async (req, res, next) => {
   // Now load full room data with optimized populate
   // Also clean up one-time shared files that have been accessed
   const room = await Room.findById(roomId)
-    .populate("owner", "name email")
-    .populate("members.user", "name email")
+    .populate("owner", "name email profileImg")
+    .populate("members.user", "name email profileImg")
     .populate({
       path: "files.fileId",
       select:
         "name type size category userId createdAt updatedAt isStarred path", // ✅ إضافة isStarred و path
       populate: {
         path: "userId",
-        select: "name email",
+        select: "name email profileImg",
       },
     })
     .populate({
@@ -584,6 +633,31 @@ exports.getRoomDetails = asyncHandler(async (req, res, next) => {
   // Update room files with processed list
   room.files = processedFiles;
 
+  // Transform profile images to full URLs
+  if (room.owner) {
+    room.owner = transformUserProfileImage(room.owner, req);
+  }
+  if (room.members && room.members.length > 0) {
+    room.members = room.members.map((member) => ({
+      ...member,
+      user: member.user
+        ? transformUserProfileImage(member.user, req)
+        : member.user,
+    }));
+  }
+  // Transform profile images in files
+  if (room.files && room.files.length > 0) {
+    room.files = room.files.map((fileEntry) => {
+      if (fileEntry.fileId && fileEntry.fileId.userId) {
+        fileEntry.fileId.userId = transformUserProfileImage(
+          fileEntry.fileId.userId,
+          req
+        );
+      }
+      return fileEntry;
+    });
+  }
+
   res.status(200).json({
     message: "Room details retrieved successfully",
     room: room,
@@ -599,14 +673,23 @@ exports.getPendingInvitations = asyncHandler(async (req, res, next) => {
     receiver: userId,
     status: "pending",
   })
-    .populate("sender", "name email")
+    .populate("sender", "name email profileImg")
     .populate("room", "name description")
     .sort({ createdAt: -1 });
 
+  // Transform profile images to full URLs
+  const transformedInvitations = invitations.map((invitation) => {
+    const invObj = invitation.toObject ? invitation.toObject() : invitation;
+    if (invObj.sender) {
+      invObj.sender = transformUserProfileImage(invObj.sender, req);
+    }
+    return invObj;
+  });
+
   res.status(200).json({
     message: "Pending invitations retrieved successfully",
-    count: invitations.length,
-    invitations: invitations,
+    count: transformedInvitations.length,
+    invitations: transformedInvitations,
   });
 });
 
@@ -1359,7 +1442,12 @@ exports.addComment = asyncHandler(async (req, res, next) => {
     content: content.trim(),
   });
 
-  await comment.populate("user", "name email");
+  await comment.populate("user", "name email profileImg");
+
+  // Transform profile image to full URL
+  if (comment.user) {
+    comment.user = transformUserProfileImage(comment.user, req);
+  }
 
   await logActivity(
     userId,
@@ -1438,13 +1526,22 @@ exports.listComments = asyncHandler(async (req, res, next) => {
   };
 
   const comments = await Comment.find(query)
-    .populate("user", "name email")
+    .populate("user", "name email profileImg")
     .sort({ createdAt: 1 });
+
+  // Transform profile images to full URLs
+  const transformedComments = comments.map((comment) => {
+    const commentObj = comment.toObject ? comment.toObject() : comment;
+    if (commentObj.user) {
+      commentObj.user = transformUserProfileImage(commentObj.user, req);
+    }
+    return commentObj;
+  });
 
   res.status(200).json({
     message: "Comments retrieved successfully",
-    count: comments.length,
-    comments,
+    count: transformedComments.length,
+    comments: transformedComments,
   });
 });
 

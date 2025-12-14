@@ -10,6 +10,14 @@ const {
   summarizeText,
   combineFileDataForSearch,
 } = require("./aiService");
+const {
+  extractImageData,
+  extractAudioTranscript,
+  extractVideoData,
+  combineImageDataForSearch,
+  combineAudioDataForSearch,
+  combineVideoDataForSearch,
+} = require("./mediaExtractionService");
 
 /**
  * معالجة ملف واحد: استخراج النص، توليد embedding، تلخيص
@@ -27,7 +35,11 @@ async function processFile(fileId) {
     }
 
     // إذا كان الملف معالج مسبقاً، تخطيه
-    if (existingFile.isProcessed && existingFile.extractedText && existingFile.embedding) {
+    if (
+      existingFile.isProcessed &&
+      existingFile.extractedText &&
+      existingFile.embedding
+    ) {
       console.log(`⏭️ File ${fileId} already processed, skipping...`);
       return existingFile;
     }
@@ -40,48 +52,109 @@ async function processFile(fileId) {
     });
 
     if (!file) {
-      console.log(`⏭️ File ${fileId} is being processed by another worker or already processed, skipping...`);
+      console.log(
+        `⏭️ File ${fileId} is being processed by another worker or already processed, skipping...`
+      );
       // إعادة جلب الملف المحدث
       const updatedFile = await File.findById(fileId);
       return updatedFile || existingFile;
     }
 
-    console.log(`🔄 Processing file: ${file.name} (${fileId})`);
+    console.log(
+      `🔄 Processing file: ${file.name} (${fileId}) - Category: ${file.category}`
+    );
 
-    // 1. استخراج النص من الملف
+    const filePath = path.join(__dirname, "..", file.path);
+
+    // التحقق من وجود الملف
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found at path: ${filePath}`);
+    }
+
+    // 1. استخراج البيانات حسب نوع الملف
     let extractedText = null;
     let extractionError = null;
+    let imageData = null;
+    let audioTranscript = null;
+    let videoData = null;
 
     try {
-      const filePath = path.join(__dirname, "..", file.path);
-
-      // التحقق من وجود الملف
-      if (!fs.existsSync(filePath)) {
-        throw new Error(`File not found at path: ${filePath}`);
+      // استخراج النص من المستندات
+      if (file.category === "Documents" || file.category === "Code") {
+        extractedText = await extractTextFromFile(
+          filePath,
+          file.type,
+          file.name
+        );
+        if (extractedText) {
+          extractedText = cleanExtractedText(extractedText);
+        }
       }
 
-      extractedText = await extractTextFromFile(filePath, file.type, file.name);
+      // استخراج بيانات الصور
+      if (file.category === "Images") {
+        console.log(`🖼️ Extracting image data for file ${fileId}...`);
+        imageData = await extractImageData(filePath);
+        if (imageData && imageData.description) {
+          extractedText = imageData.description; // استخدام الوصف كنص للبحث
+        }
+      }
 
-      if (extractedText) {
-        extractedText = cleanExtractedText(extractedText);
+      // استخراج نص من الصوت
+      if (file.category === "Audio") {
+        console.log(`🎵 Extracting audio transcript for file ${fileId}...`);
+        audioTranscript = await extractAudioTranscript(filePath);
+        if (audioTranscript) {
+          extractedText = audioTranscript;
+        }
+      }
+
+      // استخراج بيانات الفيديو
+      if (file.category === "Videos") {
+        console.log(`🎥 Extracting video data for file ${fileId}...`);
+        videoData = await extractVideoData(filePath);
+        if (videoData && videoData.transcript) {
+          extractedText = videoData.transcript;
+        } else if (videoData && videoData.description) {
+          extractedText = videoData.description;
+        }
       }
     } catch (error) {
       console.error(
-        `Error extracting text from file ${fileId}:`,
+        `Error extracting data from file ${fileId}:`,
         error.message
       );
       extractionError = error.message;
-      // نستمر حتى لو فشل استخراج النص
+      // نستمر حتى لو فشل استخراج البيانات
     }
 
-    // 2. توليد Embedding
+    // 2. توليد Embedding من البيانات المستخرجة
     let embedding = null;
     let embeddingError = null;
     try {
-      const searchText = combineFileDataForSearch({
-        ...file.toObject(),
-        extractedText: extractedText || "",
-      });
+      let searchText = "";
+
+      // بناء نص البحث حسب نوع الملف
+      if (file.category === "Images" && imageData) {
+        searchText = combineImageDataForSearch(imageData);
+        // إضافة بيانات الملف الأساسية
+        searchText =
+          `${file.name} ${file.description || ""} ${searchText}`.trim();
+      } else if (file.category === "Audio" && audioTranscript) {
+        searchText = combineAudioDataForSearch({ transcript: audioTranscript });
+        searchText =
+          `${file.name} ${file.description || ""} ${searchText}`.trim();
+      } else if (file.category === "Videos" && videoData) {
+        searchText = combineVideoDataForSearch(videoData);
+        searchText =
+          `${file.name} ${file.description || ""} ${searchText}`.trim();
+      } else {
+        // للمستندات والملفات الأخرى
+        searchText = combineFileDataForSearch({
+          ...file.toObject(),
+          extractedText: extractedText || "",
+        });
+      }
 
       console.log(
         `📝 Search text length: ${searchText ? searchText.length : 0} characters`
@@ -136,11 +209,30 @@ async function processFile(fileId) {
       embeddingError: embeddingError || null,
     };
 
+    // إضافة بيانات الصور
+    if (imageData) {
+      updateData.imageDescription = imageData.description || null;
+      updateData.imageObjects = imageData.objects || [];
+      updateData.imageScene = imageData.scene || null;
+      updateData.imageColors = imageData.colors || [];
+      updateData.imageMood = imageData.mood || null;
+      updateData.imageText = imageData.text || null;
+    }
+
+    // إضافة بيانات الصوت
+    if (audioTranscript) {
+      updateData.audioTranscript = audioTranscript;
+    }
+
+    // إضافة بيانات الفيديو
+    if (videoData) {
+      updateData.videoTranscript = videoData.transcript || null;
+      updateData.videoScenes = videoData.scenes || [];
+      updateData.videoDescription = videoData.description || null;
+    }
+
     // ✅ استخدام updateOne بدلاً من save() لتجنب version conflict
-    await File.updateOne(
-      { _id: fileId },
-      { $set: updateData }
-    );
+    await File.updateOne({ _id: fileId }, { $set: updateData });
 
     // جلب الملف المحدث للعودة
     const updatedFile = await File.findById(fileId);
@@ -156,6 +248,22 @@ async function processFile(fileId) {
     console.log(`   - Extracted text: ${extractedTextInfo}`);
     console.log(`   - Embedding: ${embeddingInfo}`);
     console.log(`   - Summary: ${summary ? "Yes" : "No"}`);
+    if (imageData) {
+      console.log(
+        `   - Image description: ${imageData.description ? "Yes" : "No"}`
+      );
+      console.log(
+        `   - Image objects: ${(imageData.objects && imageData.objects.length) || 0}`
+      );
+    }
+    if (audioTranscript) {
+      console.log(`   - Audio transcript: ${audioTranscript.length} chars`);
+    }
+    if (videoData) {
+      console.log(
+        `   - Video transcript: ${videoData.transcript ? "Yes" : "No"}`
+      );
+    }
     if (extractionError)
       console.log(`   - Extraction error: ${extractionError}`);
     if (embeddingError) console.log(`   - Embedding error: ${embeddingError}`);

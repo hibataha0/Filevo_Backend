@@ -440,6 +440,7 @@ function cosineSimilarity(vecA, vecB) {
 
 /**
  * دمج بيانات الملف في نص واحد للبحث
+ * ✅ محسّن ليشمل بيانات الصور والفيديو والصوت
  */
 function combineFileDataForSearch(file) {
   const parts = [
@@ -449,6 +450,19 @@ function combineFileDataForSearch(file) {
     file.extractedText ? file.extractedText.substring(0, 2000) : "", // أول 2000 حرف من النص المستخرج
     file.summary || "",
     ...(file.tags || []),
+    // بيانات الصور
+    file.imageDescription || "",
+    file.imageScene || "",
+    ...(file.imageObjects || []),
+    ...(file.imageColors || []),
+    file.imageMood || "",
+    file.imageText || "",
+    // بيانات الصوت
+    file.audioTranscript ? file.audioTranscript.substring(0, 2000) : "",
+    // بيانات الفيديو
+    file.videoTranscript ? file.videoTranscript.substring(0, 2000) : "",
+    file.videoDescription || "",
+    ...(file.videoScenes || []),
   ];
 
   return parts.filter(Boolean).join(" ");
