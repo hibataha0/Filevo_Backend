@@ -301,3 +301,5 @@ Image.network(
    - تأكد من أن `/uploads` static route موجود في `server.js`
    - ✅ موجود: `app.use("/uploads", express.static(path.join(__dirname, "uploads")));`
 
+
+

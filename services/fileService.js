@@ -2,13 +2,26 @@ const asyncHandler = require("express-async-handler");
 const File = require("../models/fileModel");
 const Folder = require("../models/folderModel");
 const User = require("../models/userModel");
-const { getCategoryByExtension } = require("../utils/fileUtils");
+const {
+  getCategoryByExtension,
+  isDangerousExtension,
+  convertToSafeTextFile,
+} = require("../utils/fileUtils");
+const { scanFileForViruses } = require("./virusScanService");
 const { logActivity } = require("./activityLogService");
 const { processFile } = require("./fileProcessingService");
 const fs = require("fs");
 const path = require("path");
 const archiver = require("archiver");
 const ApiError = require("../utils/apiError");
+
+function deleteFileQuietly(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (err) {
+    console.error(`Failed to delete file ${filePath}:`, err.message);
+  }
+}
 
 // Helper function to generate unique file name
 async function generateUniqueFileName(originalName, parentFolderId, userId) {
@@ -77,21 +90,62 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
     // Process each file
     for (const file of files) {
       try {
-        const category = getCategoryByExtension(
+        const scanResult = await scanFileForViruses(file.path);
+        if (scanResult.isInfected) {
+          deleteFileQuietly(file.path);
+          errors.push({
+            filename: file.originalname,
+            error: `Virus detected: ${scanResult.viruses.join(", ") || "Unknown"}`,
+          });
+          continue;
+        }
+
+        // 🔐 Security: Handle dangerous files - convert to text
+        let fileName = file.originalname;
+        let fileMimetype = file.mimetype;
+        let fileCategory = getCategoryByExtension(
           file.originalname,
           file.mimetype
         );
 
-        // Generate unique file name
+        if (file.isDangerous || isDangerousExtension(file.originalname)) {
+          // Convert dangerous file to safe text file
+          fileName = convertToSafeTextFile(file.originalname);
+          fileMimetype = "text/plain";
+          fileCategory = "Documents";
+
+          // Convert binary content to text representation for safety
+          try {
+            const fileContent = fs.readFileSync(file.path);
+            // Convert binary to hex string representation (safe text format)
+            const hexContent = fileContent.toString("hex");
+            // Save as text file with hex representation
+            fs.writeFileSync(
+              file.path,
+              `⚠️ SECURITY: This file was converted from ${file.originalExtension || path.extname(file.originalname)} to text format for safety.\n\nOriginal filename: ${file.originalname}\nFile size: ${file.size} bytes\n\nHex representation:\n${hexContent}`
+            );
+            // Update file size
+            file.size = fs.statSync(file.path).size;
+          } catch (convertError) {
+            console.error(
+              `Error converting dangerous file ${file.originalname} to text:`,
+              convertError
+            );
+          }
+        }
+
+        const category = fileCategory;
+
+        // Generate unique file name (use safe filename)
         const uniqueFileName = await generateUniqueFileName(
-          file.originalname,
+          fileName,
           parentFolderId,
           userId
         );
 
         const newFile = await File.create({
           name: uniqueFileName,
-          type: file.mimetype,
+          type: fileMimetype,
           size: file.size,
           path: file.path,
           userId: userId,
@@ -138,6 +192,7 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
           }
         );
       } catch (error) {
+        deleteFileQuietly(file.path);
         errors.push({
           filename: file.originalname,
           error: error.message,
@@ -197,6 +252,15 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
   }
 
   try {
+    const scanResult = await scanFileForViruses(file.path);
+    if (scanResult.isInfected) {
+      deleteFileQuietly(file.path);
+      return res.status(400).json({
+        message: "Virus detected in uploaded file",
+        viruses: scanResult.viruses,
+      });
+    }
+
     const category = getCategoryByExtension(file.originalname, file.mimetype); // Determine file category
 
     // Generate unique file name
@@ -358,25 +422,30 @@ exports.getFileDetails = asyncHandler(async (req, res, next) => {
 // @access  Private
 exports.getFilesByCategory = asyncHandler(async (req, res) => {
   console.time("getFilesByCategory-api");
+
   const { category } = req.params; // File category from URL
   const userId = req.user._id;
-  const parentFolderId = req.query.parentFolderId || null;
+  const parentFolderId = req.query.parentFolderId;
+
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const skip = (page - 1) * limit;
 
   // Build query
-  const query = { category, userId, isDeleted: false }; // ✅ فقط الملفات غير المحذوفة
+  const query = { category, userId, isDeleted: false };
   if (parentFolderId && parentFolderId !== "null" && parentFolderId !== "") {
     query.parentFolderId = parentFolderId;
-  } else {
-    query.parentFolderId = null; // ✅ إضافة null صراحة
   }
 
-  // جلب الملفات الخاصة بالمستخدم في نفس الفئة
-  const files = await File.find(query);
+  // Fetch files
+  const files = await File.find(query).skip(skip).limit(limit).lean();
 
   if (!files || files.length === 0) {
     console.timeEnd("getFilesByCategory-api");
-    return res.status(201).json({
+    return res.status(200).json({
       message: `No files found for user in category: ${category}`,
+      count: 0,
+      files: [],
     });
   }
 
@@ -384,6 +453,8 @@ exports.getFilesByCategory = asyncHandler(async (req, res) => {
   res.status(200).json({
     message: `Files in category: ${category}`,
     count: files.length,
+    page,
+    limit,
     files,
   });
 });

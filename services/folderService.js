@@ -3,10 +3,23 @@ const Folder = require("../models/folderModel");
 const File = require("../models/fileModel");
 const User = require("../models/userModel");
 const ApiError = require("../utils/apiError");
-const { getCategoryByExtension } = require("../utils/fileUtils");
+const {
+  getCategoryByExtension,
+  isDangerousExtension,
+  convertToSafeTextFile,
+} = require("../utils/fileUtils");
+const { scanFileForViruses } = require("./virusScanService");
 const { logActivity } = require("./activityLogService");
 const fs = require("fs");
 const path = require("path");
+
+function deleteFileQuietly(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (err) {
+    console.error(`Failed to delete file ${filePath}:`, err.message);
+  }
+}
 
 // ✅ Helper function to generate unique folder name
 async function generateUniqueFolderName(baseName, parentId, userId) {
@@ -322,6 +335,19 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
     return next(new ApiError("No files uploaded", 400));
   }
 
+  for (const file of files) {
+    const scanResult = await scanFileForViruses(file.path);
+    if (scanResult.isInfected) {
+      deleteFileQuietly(file.path);
+      return next(
+        new ApiError(
+          `Virus detected in uploaded file "${file.originalname}": ${scanResult.viruses.join(", ") || "Unknown"}`,
+          400
+        )
+      );
+    }
+  }
+
   // ✅ التحقق من أن relativePaths تطابق عدد الملفات
   if (relativePaths.length !== files.length) {
     console.warn(
@@ -367,15 +393,41 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
           `⚠️ Invalid relativePath at index ${i}, using file name: ${file.originalname}`
         );
         // ✅ استخدام اسم الملف كـ relativePath
-        const fileName = file.originalname;
-        const category = getCategoryByExtension(
+        // 🔐 Security: Handle dangerous files - convert to text
+        let fileName = file.originalname;
+        let fileMimetype = file.mimetype;
+        let fileCategory = getCategoryByExtension(
           file.originalname,
           file.mimetype
         );
 
+        if (file.isDangerous || isDangerousExtension(file.originalname)) {
+          fileName = convertToSafeTextFile(file.originalname);
+          fileMimetype = "text/plain";
+          fileCategory = "Documents";
+
+          // Convert binary content to text representation for safety
+          try {
+            const fileContent = fs.readFileSync(file.path);
+            const hexContent = fileContent.toString("hex");
+            fs.writeFileSync(
+              file.path,
+              `⚠️ SECURITY: This file was converted from ${file.originalExtension || path.extname(file.originalname)} to text format for safety.\n\nOriginal filename: ${file.originalname}\nFile size: ${file.size} bytes\n\nHex representation:\n${hexContent}`
+            );
+            file.size = fs.statSync(file.path).size;
+          } catch (convertError) {
+            console.error(
+              `Error converting dangerous file ${file.originalname} to text:`,
+              convertError
+            );
+          }
+        }
+
+        const category = fileCategory;
+
         const newFile = await File.create({
-          name: file.originalname,
-          type: file.mimetype,
+          name: fileName,
+          type: fileMimetype,
           size: file.size,
           path: file.path,
           userId: userId,
@@ -442,14 +494,41 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
           currentParentFolderId = folderMap.get(folderPath);
         }
 
-        const category = getCategoryByExtension(
+        // 🔐 Security: Handle dangerous files - convert to text
+        let safeFileName = fileName;
+        let fileMimetype = file.mimetype;
+        let fileCategory = getCategoryByExtension(
           file.originalname,
           file.mimetype
         );
 
+        if (file.isDangerous || isDangerousExtension(file.originalname)) {
+          safeFileName = convertToSafeTextFile(fileName);
+          fileMimetype = "text/plain";
+          fileCategory = "Documents";
+
+          // Convert binary content to text representation for safety
+          try {
+            const fileContent = fs.readFileSync(file.path);
+            const hexContent = fileContent.toString("hex");
+            fs.writeFileSync(
+              file.path,
+              `⚠️ SECURITY: This file was converted from ${file.originalExtension || path.extname(file.originalname)} to text format for safety.\n\nOriginal filename: ${file.originalname}\nFile size: ${file.size} bytes\n\nHex representation:\n${hexContent}`
+            );
+            file.size = fs.statSync(file.path).size;
+          } catch (convertError) {
+            console.error(
+              `Error converting dangerous file ${file.originalname} to text:`,
+              convertError
+            );
+          }
+        }
+
+        const category = fileCategory;
+
         const newFile = await File.create({
-          name: fileName, // ✅ استخدام اسم الملف من المسار
-          type: file.mimetype,
+          name: safeFileName, // ✅ استخدام اسم الملف من المسار
+          type: fileMimetype,
           size: file.size,
           path: file.path,
           userId: userId,
@@ -461,14 +540,41 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
       } else {
         // ✅ الحالة 2: relativePath هو فقط اسم ملف (مثل "file.pdf")
         // ✅ وضع الملف مباشرة في المجلد الجذر بدون إنشاء مجلدات فرعية
-        const category = getCategoryByExtension(
+        // 🔐 Security: Handle dangerous files - convert to text
+        let fileName = file.originalname;
+        let fileMimetype = file.mimetype;
+        let fileCategory = getCategoryByExtension(
           file.originalname,
           file.mimetype
         );
 
+        if (file.isDangerous || isDangerousExtension(file.originalname)) {
+          fileName = convertToSafeTextFile(file.originalname);
+          fileMimetype = "text/plain";
+          fileCategory = "Documents";
+
+          // Convert binary content to text representation for safety
+          try {
+            const fileContent = fs.readFileSync(file.path);
+            const hexContent = fileContent.toString("hex");
+            fs.writeFileSync(
+              file.path,
+              `⚠️ SECURITY: This file was converted from ${file.originalExtension || path.extname(file.originalname)} to text format for safety.\n\nOriginal filename: ${file.originalname}\nFile size: ${file.size} bytes\n\nHex representation:\n${hexContent}`
+            );
+            file.size = fs.statSync(file.path).size;
+          } catch (convertError) {
+            console.error(
+              `Error converting dangerous file ${file.originalname} to text:`,
+              convertError
+            );
+          }
+        }
+
+        const category = fileCategory;
+
         const newFile = await File.create({
-          name: file.originalname,
-          type: file.mimetype,
+          name: fileName,
+          type: fileMimetype,
           size: file.size,
           path: file.path,
           userId: userId,
@@ -520,7 +626,9 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
   // Check if user has access
   const isOwner = folder.userId._id.toString() === userId.toString();
   const isSharedWith = folder.sharedWith.some((sw) => {
-    const userIdInShared = sw.user?._id?.toString() || sw.user?.toString();
+    const userIdInShared =
+      (sw.user && sw.user._id && sw.user._id.toString()) ||
+      (sw.user && sw.user.toString());
     return userIdInShared === userId.toString();
   });
 

@@ -2,6 +2,7 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const ApiError = require("../utils/apiError");
+const { isDangerousExtension, convertToSafeTextFile } = require("../utils/fileUtils");
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = "my_files";
@@ -18,15 +19,33 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => {
     // Keep original filename but add timestamp to avoid conflicts
     const timestamp = Date.now();
-    const ext = path.extname(file.originalname);
-    const name = path.basename(file.originalname, ext);
+    
+    // 🔐 Security: Convert dangerous extensions to .txt
+    let safeFilename = file.originalname;
+    if (isDangerousExtension(file.originalname)) {
+      safeFilename = convertToSafeTextFile(file.originalname);
+      // Mark file as dangerous for later processing
+      file.isDangerous = true;
+      file.originalExtension = path.extname(file.originalname);
+    }
+    
+    const ext = path.extname(safeFilename);
+    const name = path.basename(safeFilename, ext);
     cb(null, `${timestamp}-${name}${ext}`);
   },
 });
 
-// File filter to allow all file types
+// File filter to allow all file types (dangerous files will be converted to text)
 const fileFilter = (req, file, cb) => {
-  // Allow all file types for file uploads
+  // 🔐 Security: Allow dangerous files but they will be converted to .txt
+  // This ensures they are never executed, only stored as text
+  if (isDangerousExtension(file.originalname)) {
+    // Mark file as dangerous - it will be saved as .txt
+    file.isDangerous = true;
+    file.originalExtension = path.extname(file.originalname);
+    // Change mimetype to text/plain to prevent execution
+    file.mimetype = 'text/plain';
+  }
   cb(null, true);
 };
 

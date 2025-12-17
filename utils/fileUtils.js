@@ -83,3 +83,40 @@ exports.generateUniqueFolderName = (baseName, existingNames) => {
   
   return name;
 };
+
+// 🔐 Dangerous file extensions that should be blocked or converted to text
+const DANGEROUS_EXTENSIONS = [
+  '.exe',  // Windows executable
+  '.sh',   // Shell script
+  '.bat',  // Batch file
+  '.cmd',  // Command file
+  '.msi',  // Windows installer
+  '.bin',  // Binary file
+  '.scr'   // Screen saver (can be executable)
+];
+
+// Helper function to check if a file extension is dangerous
+exports.isDangerousExtension = (filename) => {
+  if (!filename) return false;
+  const ext = filename.toLowerCase().substring(filename.lastIndexOf('.'));
+  return DANGEROUS_EXTENSIONS.includes(ext);
+};
+
+// Helper function to get dangerous extensions list
+exports.getDangerousExtensions = () => {
+  return [...DANGEROUS_EXTENSIONS];
+};
+
+// Helper function to convert dangerous filename to safe text filename
+exports.convertToSafeTextFile = (filename) => {
+  if (!filename) return 'dangerous-file.txt';
+  const ext = filename.toLowerCase().substring(filename.lastIndexOf('.'));
+  
+  if (DANGEROUS_EXTENSIONS.includes(ext)) {
+    // Remove dangerous extension and add .txt
+    const nameWithoutExt = filename.substring(0, filename.lastIndexOf('.'));
+    return `${nameWithoutExt}.txt`;
+  }
+  
+  return filename;
+};
