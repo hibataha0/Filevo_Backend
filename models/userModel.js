@@ -21,9 +21,20 @@ const userSchema = new mongoose.Schema(
     },
     password: {
       type: String,
-      required: [true, "Password is required"],
+      required: function() {
+        return this.authProvider === 'local';
+      },
       minlength: [6, "Too short password"],
-     
+    },
+    googleId: {
+      type: String,
+      unique: true,
+      sparse: true, // يسمح بقيم null متعددة
+    },
+    authProvider: {
+      type: String,
+      enum: ["local", "google"],
+      default: "local"
     },
     passwordChangedAt: Date, // 🔹 لإدارة التحقق من التوكن لاحقًا
     passwordResetCode: String,
@@ -42,10 +53,13 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// 2 - Encrypt password before saving
+// 2 - Encrypt password before saving (only for local auth)
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
-  this.password = await bcrypt.hash(this.password, 12);
+  // فقط تشفير الباسورد إذا كان authProvider = local
+  if (this.authProvider === 'local' && this.password) {
+    this.password = await bcrypt.hash(this.password, 12);
+  }
   next();
 });
 

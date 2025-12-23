@@ -5,7 +5,8 @@ const {
 } = require('../utils/validators/authValidator');
 
 const { registerUser,
-        login, 
+        login,
+        googleLogin,
         forgotPassword,
         verifyPassResetCode,
         resetPassword,
@@ -23,6 +24,9 @@ router.post('/verifyEmail', verifyEmailCode);
 router.post('/resendVerificationCode', resendVerificationCode);
 
 router.post('/login', loginValidator, login);
+
+// ✅ Google Login/Signup route
+router.post('/google', googleLogin);
 router.post('/forgotPassword', forgotPassword);
 router.post('/verifyResetCode', verifyPassResetCode);
 router.put('/resetPassword', resetPassword);

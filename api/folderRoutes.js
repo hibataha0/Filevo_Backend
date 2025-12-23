@@ -21,6 +21,10 @@ const {
   getFoldersSharedWithMe,
   getSharedFolderDetailsInRoom,
   moveFolder,
+  setFolderPassword,
+  verifyFolderAccess,
+  removeFolderProtection,
+  checkFolderAccess,
 } = require("../services/folderService");
 const { downloadFolder } = require("../services/fileService");
 const { protect } = require("../services/authService");
@@ -76,19 +80,27 @@ router.post("/:id/share", protect, shareFolder);
 router.put("/:id/share", protect, updateFolderPermissions);
 router.delete("/:id/share", protect, unshareFolder);
 
+// Move folder to another folder (must be before /:id)
+router.put("/:id/move", protect, checkFolderAccess, moveFolder);
+
+// Folder protection routes (must be before /:id)
+router.put("/:id/protect", protect, setFolderPassword);
+router.post("/:id/verify-access", protect, verifyFolderAccess);
+router.delete("/:id/protect", protect, removeFolderProtection);
+
 // Update folder metadata (must be before delete and get routes)
-router.put("/:id", protect, updateFolder);
+router.put("/:id", protect, checkFolderAccess, updateFolder);
 
 // Delete folder (move to trash)
-router.delete("/:id", protect, deleteFolder);
+router.delete("/:id", protect, checkFolderAccess, deleteFolder);
 
 // Get folder contents (must be before /:id)
-router.get("/:id/contents", protect, getFolderContents);
+router.get("/:id/contents", protect, checkFolderAccess, getFolderContents);
 
 // Download folder as zip (must be before /:id)
-router.get("/:id/download", protect, downloadFolder);
+router.get("/:id/download", protect, checkFolderAccess, downloadFolder);
 
 // Get folder details
-router.get("/:id", protect, getFolderDetails);
+router.get("/:id", protect, checkFolderAccess, getFolderDetails);
 
 module.exports = router;

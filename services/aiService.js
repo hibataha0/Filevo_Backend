@@ -524,12 +524,23 @@ async function checkHFConnection() {
             };
           }
         } catch (openRouterError) {
-          console.warn(`⚠️ OpenRouter test failed: ${openRouterError.message}`);
-          if (openRouterError.response) {
-            console.warn(`   Status: ${openRouterError.response.status}`);
-            console.warn(
-              `   Data: ${JSON.stringify(openRouterError.response.data)}`
-            );
+          // Handle expected errors more gracefully
+          const errorMessage = openRouterError.message || '';
+          const status = openRouterError.status || openRouterError.response?.status;
+          
+          // Check for 402 (Insufficient credits) - most common expected error
+          if (status === 402 || errorMessage.includes('402') || errorMessage.includes('Insufficient credits')) {
+            console.warn(`⚠️ OpenRouter API: Insufficient credits. AI search features may not work.`);
+            console.warn(`   💡 To enable: Add credits at https://openrouter.ai/settings/credits`);
+          } else if (status === 410 || errorMessage.includes('410')) {
+            // Gone - model or endpoint no longer available
+            console.warn(`⚠️ OpenRouter API: Service unavailable (410). Trying HuggingFace fallback...`);
+          } else {
+            // Other errors - show more details
+            console.warn(`⚠️ OpenRouter test failed: ${errorMessage}`);
+            if (status) {
+              console.warn(`   Status: ${status}`);
+            }
           }
           console.warn(`   Checking HuggingFace fallback...`);
         }
@@ -620,10 +631,16 @@ async function checkHFConnection() {
         };
       }
 
+      // Provide cleaner error messages
+      let errorMessage = testError.message;
+      if (testError.response && testError.response.status === 410) {
+        errorMessage = "Service unavailable (410) - endpoint no longer available";
+      }
+
       return {
         connected: false,
         provider: "HuggingFace (Fallback)",
-        error: testError.message,
+        error: errorMessage,
         note: "HuggingFace API test failed. Consider using OpenRouter API instead.",
         openRouterSetup: "Get free token from: https://openrouter.ai/keys",
       };

@@ -1,6 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const sharp = require("sharp");
-const { v4: uuidv4 } = require("uuid");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { uploadSingleImage } = require("./uploadImageMiddleware");
@@ -10,7 +10,7 @@ exports.uploadUserImage = uploadSingleImage("profileImg");
 
 // Image processing for profile image
 exports.resizeProfileImage = asyncHandler(async (req, res, next) => {
-  const filename = `user-profile-${uuidv4()}-${Date.now()}.jpeg`;
+  const filename = `user-profile-${crypto.randomUUID()}-${Date.now()}.jpeg`;
 
   if (req.file) {
     // إنشاء مجلد uploads/users إذا لم يكن موجوداً

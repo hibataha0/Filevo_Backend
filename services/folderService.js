@@ -1,25 +1,13 @@
 const asyncHandler = require("express-async-handler");
+const bcrypt = require("bcryptjs");
 const Folder = require("../models/folderModel");
 const File = require("../models/fileModel");
 const User = require("../models/userModel");
 const ApiError = require("../utils/apiError");
-const {
-  getCategoryByExtension,
-  isDangerousExtension,
-  convertToSafeTextFile,
-} = require("../utils/fileUtils");
-const { scanFileForViruses } = require("./virusScanService");
+const { getCategoryByExtension } = require("../utils/fileUtils");
 const { logActivity } = require("./activityLogService");
 const fs = require("fs");
 const path = require("path");
-
-function deleteFileQuietly(filePath) {
-  try {
-    fs.unlinkSync(filePath);
-  } catch (err) {
-    console.error(`Failed to delete file ${filePath}:`, err.message);
-  }
-}
 
 // ✅ Helper function to generate unique folder name
 async function generateUniqueFolderName(baseName, parentId, userId) {
@@ -253,6 +241,10 @@ exports.createFolder = asyncHandler(async (req, res, next) => {
     parentId: validatedParentId,
     isShared: false,
     sharedWith: [],
+    // ✅ التأكد من أن المجلد الجديد غير محمي
+    isProtected: false,
+    protectionType: "none",
+    passwordHash: null,
   });
 
   await logActivity(
@@ -335,19 +327,6 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
     return next(new ApiError("No files uploaded", 400));
   }
 
-  for (const file of files) {
-    const scanResult = await scanFileForViruses(file.path);
-    if (scanResult.isInfected) {
-      deleteFileQuietly(file.path);
-      return next(
-        new ApiError(
-          `Virus detected in uploaded file "${file.originalname}": ${scanResult.viruses.join(", ") || "Unknown"}`,
-          400
-        )
-      );
-    }
-  }
-
   // ✅ التحقق من أن relativePaths تطابق عدد الملفات
   if (relativePaths.length !== files.length) {
     console.warn(
@@ -393,41 +372,15 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
           `⚠️ Invalid relativePath at index ${i}, using file name: ${file.originalname}`
         );
         // ✅ استخدام اسم الملف كـ relativePath
-        // 🔐 Security: Handle dangerous files - convert to text
-        let fileName = file.originalname;
-        let fileMimetype = file.mimetype;
-        let fileCategory = getCategoryByExtension(
+        const fileName = file.originalname;
+        const category = getCategoryByExtension(
           file.originalname,
           file.mimetype
         );
 
-        if (file.isDangerous || isDangerousExtension(file.originalname)) {
-          fileName = convertToSafeTextFile(file.originalname);
-          fileMimetype = "text/plain";
-          fileCategory = "Documents";
-
-          // Convert binary content to text representation for safety
-          try {
-            const fileContent = fs.readFileSync(file.path);
-            const hexContent = fileContent.toString("hex");
-            fs.writeFileSync(
-              file.path,
-              `⚠️ SECURITY: This file was converted from ${file.originalExtension || path.extname(file.originalname)} to text format for safety.\n\nOriginal filename: ${file.originalname}\nFile size: ${file.size} bytes\n\nHex representation:\n${hexContent}`
-            );
-            file.size = fs.statSync(file.path).size;
-          } catch (convertError) {
-            console.error(
-              `Error converting dangerous file ${file.originalname} to text:`,
-              convertError
-            );
-          }
-        }
-
-        const category = fileCategory;
-
         const newFile = await File.create({
-          name: fileName,
-          type: fileMimetype,
+          name: file.originalname,
+          type: file.mimetype,
           size: file.size,
           path: file.path,
           userId: userId,
@@ -494,41 +447,14 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
           currentParentFolderId = folderMap.get(folderPath);
         }
 
-        // 🔐 Security: Handle dangerous files - convert to text
-        let safeFileName = fileName;
-        let fileMimetype = file.mimetype;
-        let fileCategory = getCategoryByExtension(
+        const category = getCategoryByExtension(
           file.originalname,
           file.mimetype
         );
 
-        if (file.isDangerous || isDangerousExtension(file.originalname)) {
-          safeFileName = convertToSafeTextFile(fileName);
-          fileMimetype = "text/plain";
-          fileCategory = "Documents";
-
-          // Convert binary content to text representation for safety
-          try {
-            const fileContent = fs.readFileSync(file.path);
-            const hexContent = fileContent.toString("hex");
-            fs.writeFileSync(
-              file.path,
-              `⚠️ SECURITY: This file was converted from ${file.originalExtension || path.extname(file.originalname)} to text format for safety.\n\nOriginal filename: ${file.originalname}\nFile size: ${file.size} bytes\n\nHex representation:\n${hexContent}`
-            );
-            file.size = fs.statSync(file.path).size;
-          } catch (convertError) {
-            console.error(
-              `Error converting dangerous file ${file.originalname} to text:`,
-              convertError
-            );
-          }
-        }
-
-        const category = fileCategory;
-
         const newFile = await File.create({
-          name: safeFileName, // ✅ استخدام اسم الملف من المسار
-          type: fileMimetype,
+          name: fileName, // ✅ استخدام اسم الملف من المسار
+          type: file.mimetype,
           size: file.size,
           path: file.path,
           userId: userId,
@@ -540,41 +466,14 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
       } else {
         // ✅ الحالة 2: relativePath هو فقط اسم ملف (مثل "file.pdf")
         // ✅ وضع الملف مباشرة في المجلد الجذر بدون إنشاء مجلدات فرعية
-        // 🔐 Security: Handle dangerous files - convert to text
-        let fileName = file.originalname;
-        let fileMimetype = file.mimetype;
-        let fileCategory = getCategoryByExtension(
+        const category = getCategoryByExtension(
           file.originalname,
           file.mimetype
         );
 
-        if (file.isDangerous || isDangerousExtension(file.originalname)) {
-          fileName = convertToSafeTextFile(file.originalname);
-          fileMimetype = "text/plain";
-          fileCategory = "Documents";
-
-          // Convert binary content to text representation for safety
-          try {
-            const fileContent = fs.readFileSync(file.path);
-            const hexContent = fileContent.toString("hex");
-            fs.writeFileSync(
-              file.path,
-              `⚠️ SECURITY: This file was converted from ${file.originalExtension || path.extname(file.originalname)} to text format for safety.\n\nOriginal filename: ${file.originalname}\nFile size: ${file.size} bytes\n\nHex representation:\n${hexContent}`
-            );
-            file.size = fs.statSync(file.path).size;
-          } catch (convertError) {
-            console.error(
-              `Error converting dangerous file ${file.originalname} to text:`,
-              convertError
-            );
-          }
-        }
-
-        const category = fileCategory;
-
         const newFile = await File.create({
-          name: fileName,
-          type: fileMimetype,
+          name: file.originalname,
+          type: file.mimetype,
           size: file.size,
           path: file.path,
           userId: userId,
@@ -626,9 +525,7 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
   // Check if user has access
   const isOwner = folder.userId._id.toString() === userId.toString();
   const isSharedWith = folder.sharedWith.some((sw) => {
-    const userIdInShared =
-      (sw.user && sw.user._id && sw.user._id.toString()) ||
-      (sw.user && sw.user.toString());
+    const userIdInShared = sw.user?._id?.toString() || sw.user?.toString();
     return userIdInShared === userId.toString();
   });
 
@@ -744,6 +641,9 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
     filesCount: totalFilesCount, // ✅ عدد الملفات الكلي (recursive)
     totalItems: subfoldersCount + directFilesCount, // ✅ العناصر المباشرة فقط
     isStarred: folder.isStarred,
+    // 🔒 Folder Protection Info (without password hash)
+    isProtected: folder.isProtected || false,
+    protectionType: folder.protectionType || "none",
     createdAt: folder.createdAt,
     updatedAt: folder.updatedAt,
     lastModified: folder.updatedAt,
@@ -1768,4 +1668,302 @@ exports.getSharedFolderDetailsInRoom = asyncHandler(async (req, res, next) => {
       totalItems: subfoldersCount + directFilesCount, // ✅ العناصر المباشرة فقط
     },
   });
+});
+
+// ============================================
+// 🔒 FOLDER PROTECTION FUNCTIONS
+// ============================================
+
+// @desc    Set password protection for folder
+// @route   PUT /api/v1/folders/:id/protect
+// @access  Private
+exports.setFolderPassword = asyncHandler(async (req, res, next) => {
+  const folderId = req.params.id;
+  const userId = req.user._id;
+  const { password, protectionType = "password" } = req.body;
+
+  // Find folder
+  const folder = await Folder.findOne({ _id: folderId, userId: userId });
+  if (!folder) {
+    return next(new ApiError("Folder not found", 404));
+  }
+
+  // ✅ التحقق من نوع الحماية
+  if (protectionType !== "password" && protectionType !== "biometric") {
+    return next(
+      new ApiError(
+        "protectionType must be either 'password' or 'biometric'",
+        400
+      )
+    );
+  }
+
+  // ✅ التحقق من البيانات المطلوبة
+  if (protectionType === "password") {
+    if (!password || password.trim().length === 0) {
+      return next(
+        new ApiError("Password is required for password protection", 400)
+      );
+    }
+    if (password.length < 4) {
+      return next(
+        new ApiError("Password must be at least 4 characters long", 400)
+      );
+    }
+  }
+
+  if (protectionType === "biometric") {
+    if (password) {
+      return next(
+        new ApiError(
+          "Password should not be provided for biometric protection",
+          400
+        )
+      );
+    }
+  }
+
+  // ✅ تعيين الحماية
+  folder.isProtected = true;
+  folder.protectionType = protectionType;
+
+  // ✅ تشفير كلمة السر إذا كانت من نوع password
+  if (protectionType === "password" && password) {
+    const saltRounds = 10;
+    folder.passwordHash = await bcrypt.hash(password, saltRounds);
+  } else if (protectionType === "biometric") {
+    // للبصمة، لا نحتاج passwordHash
+    folder.passwordHash = null;
+  }
+
+  await folder.save();
+
+  // Log activity
+  await logActivity(
+    userId,
+    "folder_updated",
+    "folder",
+    folder._id,
+    folder.name,
+    {
+      action: "password_protection_set",
+      protectionType: protectionType,
+    },
+    {
+      ipAddress: req.ip,
+      userAgent: req.get("User-Agent"),
+    }
+  );
+
+  res.status(200).json({
+    message: "✅ Folder protection enabled successfully",
+    folder: {
+      _id: folder._id,
+      name: folder.name,
+      isProtected: folder.isProtected,
+      protectionType: folder.protectionType,
+    },
+  });
+});
+
+// @desc    Verify folder password/biometric
+// @route   POST /api/v1/folders/:id/verify-access
+// @access  Private
+exports.verifyFolderAccess = asyncHandler(async (req, res, next) => {
+  const folderId = req.params.id;
+  const userId = req.user._id;
+  const { password, biometricToken } = req.body;
+
+  // Find folder with password hash
+  const folder = await Folder.findOne({ _id: folderId, userId: userId }).select(
+    "+passwordHash"
+  );
+
+  if (!folder) {
+    return next(new ApiError("Folder not found", 404));
+  }
+
+  // ✅ التحقق من الحالة
+  if (!folder.isProtected || folder.protectionType === "none") {
+    // ✅ إصلاح حالة غير متسقة إذا وجدت
+    if (folder.isProtected && folder.protectionType === "none") {
+      folder.isProtected = false;
+      folder.protectionType = "none";
+      folder.passwordHash = null;
+      await folder.save();
+    }
+
+    return res.status(200).json({
+      message: "Folder is not protected",
+      hasAccess: true,
+    });
+  }
+
+  // ✅ التحقق من نوع الحماية
+  if (
+    folder.protectionType !== "password" &&
+    folder.protectionType !== "biometric"
+  ) {
+    return next(new ApiError("Invalid protection type", 500));
+  }
+
+  // Verify based on protection type
+  let hasAccess = false;
+
+  if (folder.protectionType === "password") {
+    if (!password) {
+      return next(new ApiError("Password is required", 400));
+    }
+
+    if (!folder.passwordHash) {
+      return next(
+        new ApiError("Folder protection is not properly configured", 500)
+      );
+    }
+
+    hasAccess = await bcrypt.compare(password, folder.passwordHash);
+  } else if (folder.protectionType === "biometric") {
+    // For biometric, the frontend should verify the biometric first
+    // Then send a token. Here we just verify the token exists
+    // In a real implementation, you might want to verify the token signature
+    if (!biometricToken) {
+      return next(
+        new ApiError("Biometric verification token is required", 400)
+      );
+    }
+
+    // For now, we'll accept any non-empty token
+    // In production, you should verify the token signature
+    hasAccess = !!biometricToken;
+  }
+
+  if (!hasAccess) {
+    return next(
+      new ApiError(
+        "Access denied. Invalid password or biometric verification failed",
+        403
+      )
+    );
+  }
+
+  res.status(200).json({
+    message: "✅ Access granted",
+    hasAccess: true,
+    folder: {
+      _id: folder._id,
+      name: folder.name,
+    },
+  });
+});
+
+// @desc    Remove folder protection
+// @route   DELETE /api/v1/folders/:id/protect
+// @access  Private
+exports.removeFolderProtection = asyncHandler(async (req, res, next) => {
+  const folderId = req.params.id;
+  const userId = req.user._id;
+  const { password } = req.body; // Require password to remove protection
+
+  // Find folder with password hash
+  const folder = await Folder.findOne({ _id: folderId, userId: userId }).select(
+    "+passwordHash"
+  );
+
+  if (!folder) {
+    return next(new ApiError("Folder not found", 404));
+  }
+
+  if (!folder.isProtected) {
+    return next(new ApiError("Folder is not protected", 400));
+  }
+
+  // Verify password before removing protection
+  if (folder.protectionType === "password" && folder.passwordHash) {
+    if (!password) {
+      return next(
+        new ApiError("Password is required to remove protection", 400)
+      );
+    }
+
+    const isMatch = await bcrypt.compare(password, folder.passwordHash);
+    if (!isMatch) {
+      return next(
+        new ApiError("Invalid password. Cannot remove protection", 403)
+      );
+    }
+  }
+
+  // ✅ إزالة الحماية - تنظيف كامل
+  folder.isProtected = false;
+  folder.protectionType = "none";
+  folder.passwordHash = null;
+
+  await folder.save();
+
+  // Log activity
+  await logActivity(
+    userId,
+    "folder_updated",
+    "folder",
+    folder._id,
+    folder.name,
+    {
+      action: "password_protection_removed",
+    },
+    {
+      ipAddress: req.ip,
+      userAgent: req.get("User-Agent"),
+    }
+  );
+
+  res.status(200).json({
+    message: "✅ Folder protection removed successfully",
+    folder: {
+      _id: folder._id,
+      name: folder.name,
+      isProtected: folder.isProtected,
+      protectionType: folder.protectionType,
+    },
+  });
+});
+
+// @desc    Middleware to check folder protection before access
+// This will be used in routes that need folder access
+exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
+  const folderId = req.params.id || req.body.folderId || req.query.folderId;
+  const userId = req.user._id;
+
+  if (!folderId) {
+    return next(); // No folder ID, skip check
+  }
+
+  // Find folder
+  const folder = await Folder.findOne({ _id: folderId, userId: userId });
+
+  if (!folder) {
+    return next(new ApiError("Folder not found", 404));
+  }
+
+  // ✅ التحقق من الاتساق: إذا كان غير محمي، السماح بالوصول
+  if (!folder.isProtected || folder.protectionType === "none") {
+    // ✅ التأكد من أن الحالة متسقة
+    if (folder.isProtected && folder.protectionType === "none") {
+      // إصلاح حالة غير متسقة
+      folder.isProtected = false;
+      folder.protectionType = "none";
+      folder.passwordHash = null;
+      await folder.save();
+    }
+    return next();
+  }
+
+  // ✅ المجلد محمي - يتطلب التحقق
+  // Check if access token is provided in headers (for biometric or session-based access)
+  const accessToken = req.headers["x-folder-access-token"];
+
+  // For now, we'll require explicit verification via verify-access endpoint
+  // In a more advanced implementation, you could use session tokens
+  return next(
+    new ApiError("Folder is protected. Please verify access first", 403)
+  );
 });

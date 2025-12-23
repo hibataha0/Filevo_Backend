@@ -2,23 +2,39 @@ const asyncHandler = require("express-async-handler");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const { OAuth2Client } = require("google-auth-library");
 
 const ApiError = require("../utils/apiError");
 const createToken = require("../utils/createToken");
 const User = require("../models/userModel");
 const sendEmail = require("../utils/sendEmail");
 
+// Initialize Google OAuth2 client
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
 // @desc    Register new user
 // @route   POST /api/v1/auth/register
 // @access  Public
 
 exports.registerUser = asyncHandler(async (req, res, next) => {
+  // ✅ التحقق من أن الإيميل غير مستخدم كحساب Google
+  const existingUser = await User.findOne({ email: req.body.email.toLowerCase() });
+  if (existingUser && existingUser.authProvider === "google") {
+    return next(
+      new ApiError(
+        "هذا البريد الإلكتروني مسجل بالفعل عبر Google. يرجى استخدام تسجيل الدخول عبر Google",
+        400
+      )
+    );
+  }
+
   // ✅ إنشاء المستخدم مع emailVerified = false
   const user = await User.create({
     name: req.body.name,
     email: req.body.email,
     password: req.body.password,
     emailVerified: false, // ✅ الحساب غير مفعّل حتى الآن
+    authProvider: "local", // تأكيد أن هذا حساب محلي
   });
 
   // ✅ توليد كود تحقق من 6 أرقام
@@ -176,6 +192,81 @@ exports.resendVerificationCode = asyncHandler(async (req, res, next) => {
   });
 });
 
+// @desc    Google Login/Signup
+// @route   POST /api/v1/auth/google
+// @access  Public
+exports.googleLogin = asyncHandler(async (req, res, next) => {
+  const { token } = req.body;
+
+  if (!token) {
+    return next(new ApiError("Google token is required", 400));
+  }
+
+  try {
+    // Verify the Google token
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    const { email, name, picture, sub: googleId } = payload;
+
+    // 🔍 البحث عن المستخدم
+    let user = await User.findOne({ email: email.toLowerCase() });
+
+    if (!user) {
+      // إنشاء مستخدم جديد
+      user = await User.create({
+        name,
+        email: email.toLowerCase(),
+        googleId,
+        profileImg: picture,
+        authProvider: "google",
+        emailVerified: true, // Google accounts are automatically verified
+      });
+    } else {
+      // المستخدم موجود - تحديث معلومات Google إذا لزم الأمر
+      if (user.authProvider !== "google") {
+        return next(
+          new ApiError(
+            "هذا الحساب مسجل باستخدام البريد الإلكتروني وكلمة المرور. يرجى استخدام تسجيل الدخول العادي",
+            400
+          )
+        );
+      }
+
+      // تحديث معلومات Google
+      user.googleId = googleId;
+      if (picture && !user.profileImg) {
+        user.profileImg = picture;
+      }
+      user.emailVerified = true;
+      await user.save();
+    }
+
+    // 🔐 إنشاء JWT
+    const jwtToken = createToken(user._id);
+
+    // ✅ حذف كلمة المرور من الاستجابة
+    delete user._doc.password;
+
+    // ✅ تحويل profileImg إلى URL كامل
+    const { transformUserProfileImage } = require("../utils/profileImageHelper");
+    const userWithProfileUrl = transformUserProfileImage(user, req);
+
+    res.status(200).json({
+      success: true,
+      message: "تم تسجيل الدخول بنجاح",
+      data: userWithProfileUrl,
+      token: jwtToken,
+    });
+  } catch (error) {
+    console.error("Google login error:", error);
+    return next(new ApiError("فشل التحقق من Google token", 401));
+  }
+});
+
 // @desc    Login
 // @route   GET /api/v1/auth/login
 // @access  Public
@@ -184,7 +275,30 @@ exports.login = asyncHandler(async (req, res, next) => {
   // 2) check if user exist & check if password is correct
   const user = await User.findOne({ email: req.body.email });
 
-  if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
+  if (!user) {
+    return next(
+      new ApiError("البريد الإلكتروني أو كلمة المرور غير صحيحة", 401)
+    );
+  }
+
+  // ✅ منع المستخدمين الذين سجلوا عبر Google من الدخول بالبريد/الباسورد
+  if (user.authProvider === "google") {
+    return next(
+      new ApiError(
+        "هذا الحساب مسجل عبر Google. يرجى استخدام تسجيل الدخول عبر Google",
+        400
+      )
+    );
+  }
+
+  // ✅ التحقق من وجود كلمة المرور
+  if (!user.password) {
+    return next(
+      new ApiError("البريد الإلكتروني أو كلمة المرور غير صحيحة", 401)
+    );
+  }
+
+  if (!(await bcrypt.compare(req.body.password, user.password))) {
     return next(
       new ApiError("البريد الإلكتروني أو كلمة المرور غير صحيحة", 401)
     );

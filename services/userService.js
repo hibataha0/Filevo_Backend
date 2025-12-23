@@ -25,6 +25,16 @@ exports.getLoggedUserData = asyncHandler(async (req, res, next) => {
 exports.updateLoggedUserPassword = asyncHandler(async (req, res, next) => {
   const user = await User.findById(req.user._id);
 
+  // ✅ منع تغيير كلمة المرور للمستخدمين الذين سجلوا عبر Google
+  if (user.authProvider === "google") {
+    return next(
+      new ApiError(
+        "لا يمكن تغيير كلمة المرور لحساب مسجل عبر Google",
+        400
+      )
+    );
+  }
+
   // تحقق من كلمة المرور القديمة إذا أردت
   user.password = await bcrypt.hash(req.body.password, 12);
   user.passwordChangedAt = Date.now();

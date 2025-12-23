@@ -109,10 +109,25 @@ const checkHFOnStartup = () => {
       if (result.note) console.log(`   ${result.note}`);
       if (result.recommendation) console.log(`   💡 ${result.recommendation}`);
     } else {
-      console.warn(
-        "⚠️ AI API connection failed. AI search features may not work."
+      // Only show detailed error if it's not an expected configuration issue
+      const isExpectedError = result.error && (
+        result.error.includes("Insufficient credits") ||
+        result.error.includes("410") ||
+        result.error.includes("No API key")
       );
-      console.warn(`   Error: ${result.error}`);
+      
+      if (isExpectedError) {
+        console.warn(
+          "⚠️ AI API connection failed. AI search features may not work."
+        );
+        if (result.note) console.warn(`   ${result.note}`);
+      } else {
+        console.warn(
+          "⚠️ AI API connection failed. AI search features may not work."
+        );
+        console.warn(`   Error: ${result.error}`);
+        if (result.note) console.warn(`   ${result.note}`);
+      }
     }
   }, 2000);
 };

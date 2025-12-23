@@ -162,27 +162,43 @@ async function smartSearch(userId, query, options = {}) {
         aiQuery.createdAt = dateFilter;
       }
 
-      const filesWithEmbeddings = await File.find(aiQuery).lean();
+      // Limit the number of files to process to prevent memory issues and hanging
+      const maxFilesToProcess = 500; // Maximum files to process for AI search
+      const filesWithEmbeddings = await File.find(aiQuery)
+        .limit(maxFilesToProcess)
+        .lean();
 
       console.log(`Found ${filesWithEmbeddings.length} files with embeddings`);
 
-      // حساب التشابه لكل ملف
-      filesWithEmbeddings.forEach((file) => {
-        if (!file.embedding || file.embedding.length === 0) {
-          return;
-        }
+      // حساب التشابه لكل ملف - استخدام batch processing لتجنب blocking
+      // Process in smaller chunks to avoid blocking the event loop
+      const chunkSize = 50;
+      for (let i = 0; i < filesWithEmbeddings.length; i += chunkSize) {
+        const chunk = filesWithEmbeddings.slice(i, i + chunkSize);
+        
+        // Process chunk synchronously but yield to event loop between chunks
+        chunk.forEach((file) => {
+          if (!file.embedding || file.embedding.length === 0) {
+            return;
+          }
 
-        const similarity = cosineSimilarity(queryEmbedding, file.embedding);
+          const similarity = cosineSimilarity(queryEmbedding, file.embedding);
 
-        if (similarity >= minScore) {
-          aiResults.push({
-            type: "file",
-            item: file,
-            score: similarity,
-            searchType: "ai",
-          });
+          if (similarity >= minScore) {
+            aiResults.push({
+              type: "file",
+              item: file,
+              score: similarity,
+              searchType: "ai",
+            });
+          }
+        });
+        
+        // Yield to event loop every chunk to prevent blocking
+        if (i + chunkSize < filesWithEmbeddings.length) {
+          await new Promise(resolve => setImmediate(resolve));
         }
-      });
+      }
 
       // ترتيب نتائج AI
       aiResults.sort((a, b) => b.score - a.score);

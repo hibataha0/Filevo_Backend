@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const folderSchema = new mongoose.Schema(
   {
@@ -69,13 +69,65 @@ const folderSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
-    tags: [{
+    tags: [
+      {
+        type: String,
+        trim: true,
+      },
+    ],
+    // 🔒 Folder Protection Fields
+    isProtected: {
+      type: Boolean,
+      default: false,
+    },
+    passwordHash: {
       type: String,
-      trim: true,
-    }],
+      default: null,
+      select: false, // لا يتم إرجاعها تلقائياً في الاستعلامات
+    },
+    protectionType: {
+      type: String,
+      enum: ["none", "password", "biometric"],
+      default: "none",
+      validate: {
+        validator: function (value) {
+          // إذا كان محمياً، يجب أن يكون protectionType إما 'password' أو 'biometric'
+          if (this.isProtected && value === "none") {
+            return false;
+          }
+          // إذا كان غير محمي، يجب أن يكون protectionType = 'none'
+          if (!this.isProtected && value !== "none") {
+            return false;
+          }
+          return true;
+        },
+        message: "protectionType must match isProtected status",
+      },
+    },
   },
   { timestamps: true }
 );
 
-const Folder = mongoose.model('Folder', folderSchema);
+// ✅ Pre-save hook للتأكد من الاتساق
+folderSchema.pre("save", function (next) {
+  // إذا كان غير محمي، تأكد من تنظيف الحقول
+  if (!this.isProtected) {
+    this.protectionType = "none";
+    this.passwordHash = null;
+  } else {
+    // إذا كان محمياً، تأكد من أن protectionType ليس 'none'
+    if (this.protectionType === "none") {
+      this.protectionType = "password"; // افتراضي
+    }
+
+    // إذا كان protectionType = 'password'، يجب أن يكون هناك passwordHash
+    if (this.protectionType === "password" && !this.passwordHash) {
+      // سنسمح بذلك في حالة التحديث (سيتم تعيينه لاحقاً)
+      // لكن سنتحقق في setFolderPassword
+    }
+  }
+  next();
+});
+
+const Folder = mongoose.model("Folder", folderSchema);
 module.exports = Folder;

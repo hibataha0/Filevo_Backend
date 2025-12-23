@@ -2,26 +2,13 @@ const asyncHandler = require("express-async-handler");
 const File = require("../models/fileModel");
 const Folder = require("../models/folderModel");
 const User = require("../models/userModel");
-const {
-  getCategoryByExtension,
-  isDangerousExtension,
-  convertToSafeTextFile,
-} = require("../utils/fileUtils");
-const { scanFileForViruses } = require("./virusScanService");
+const { getCategoryByExtension } = require("../utils/fileUtils");
 const { logActivity } = require("./activityLogService");
 const { processFile } = require("./fileProcessingService");
 const fs = require("fs");
 const path = require("path");
 const archiver = require("archiver");
 const ApiError = require("../utils/apiError");
-
-function deleteFileQuietly(filePath) {
-  try {
-    fs.unlinkSync(filePath);
-  } catch (err) {
-    console.error(`Failed to delete file ${filePath}:`, err.message);
-  }
-}
 
 // Helper function to generate unique file name
 async function generateUniqueFileName(originalName, parentFolderId, userId) {
@@ -90,62 +77,21 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
     // Process each file
     for (const file of files) {
       try {
-        const scanResult = await scanFileForViruses(file.path);
-        if (scanResult.isInfected) {
-          deleteFileQuietly(file.path);
-          errors.push({
-            filename: file.originalname,
-            error: `Virus detected: ${scanResult.viruses.join(", ") || "Unknown"}`,
-          });
-          continue;
-        }
-
-        // 🔐 Security: Handle dangerous files - convert to text
-        let fileName = file.originalname;
-        let fileMimetype = file.mimetype;
-        let fileCategory = getCategoryByExtension(
+        const category = getCategoryByExtension(
           file.originalname,
           file.mimetype
         );
 
-        if (file.isDangerous || isDangerousExtension(file.originalname)) {
-          // Convert dangerous file to safe text file
-          fileName = convertToSafeTextFile(file.originalname);
-          fileMimetype = "text/plain";
-          fileCategory = "Documents";
-
-          // Convert binary content to text representation for safety
-          try {
-            const fileContent = fs.readFileSync(file.path);
-            // Convert binary to hex string representation (safe text format)
-            const hexContent = fileContent.toString("hex");
-            // Save as text file with hex representation
-            fs.writeFileSync(
-              file.path,
-              `⚠️ SECURITY: This file was converted from ${file.originalExtension || path.extname(file.originalname)} to text format for safety.\n\nOriginal filename: ${file.originalname}\nFile size: ${file.size} bytes\n\nHex representation:\n${hexContent}`
-            );
-            // Update file size
-            file.size = fs.statSync(file.path).size;
-          } catch (convertError) {
-            console.error(
-              `Error converting dangerous file ${file.originalname} to text:`,
-              convertError
-            );
-          }
-        }
-
-        const category = fileCategory;
-
-        // Generate unique file name (use safe filename)
+        // Generate unique file name
         const uniqueFileName = await generateUniqueFileName(
-          fileName,
+          file.originalname,
           parentFolderId,
           userId
         );
 
         const newFile = await File.create({
           name: uniqueFileName,
-          type: fileMimetype,
+          type: file.mimetype,
           size: file.size,
           path: file.path,
           userId: userId,
@@ -192,7 +138,6 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
           }
         );
       } catch (error) {
-        deleteFileQuietly(file.path);
         errors.push({
           filename: file.originalname,
           error: error.message,
@@ -252,15 +197,6 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
   }
 
   try {
-    const scanResult = await scanFileForViruses(file.path);
-    if (scanResult.isInfected) {
-      deleteFileQuietly(file.path);
-      return res.status(400).json({
-        message: "Virus detected in uploaded file",
-        viruses: scanResult.viruses,
-      });
-    }
-
     const category = getCategoryByExtension(file.originalname, file.mimetype); // Determine file category
 
     // Generate unique file name
@@ -422,30 +358,25 @@ exports.getFileDetails = asyncHandler(async (req, res, next) => {
 // @access  Private
 exports.getFilesByCategory = asyncHandler(async (req, res) => {
   console.time("getFilesByCategory-api");
-
   const { category } = req.params; // File category from URL
   const userId = req.user._id;
-  const parentFolderId = req.query.parentFolderId;
-
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 20;
-  const skip = (page - 1) * limit;
+  const parentFolderId = req.query.parentFolderId || null;
 
   // Build query
-  const query = { category, userId, isDeleted: false };
+  const query = { category, userId, isDeleted: false }; // ✅ فقط الملفات غير المحذوفة
   if (parentFolderId && parentFolderId !== "null" && parentFolderId !== "") {
     query.parentFolderId = parentFolderId;
+  } else {
+    query.parentFolderId = null; // ✅ إضافة null صراحة
   }
 
-  // Fetch files
-  const files = await File.find(query).skip(skip).limit(limit).lean();
+  // جلب الملفات الخاصة بالمستخدم في نفس الفئة
+  const files = await File.find(query);
 
   if (!files || files.length === 0) {
     console.timeEnd("getFilesByCategory-api");
-    return res.status(200).json({
+    return res.status(201).json({
       message: `No files found for user in category: ${category}`,
-      count: 0,
-      files: [],
     });
   }
 
@@ -453,8 +384,6 @@ exports.getFilesByCategory = asyncHandler(async (req, res) => {
   res.status(200).json({
     message: `Files in category: ${category}`,
     count: files.length,
-    page,
-    limit,
     files,
   });
 });
@@ -967,8 +896,7 @@ exports.updateFile = asyncHandler(async (req, res) => {
   // Update parent folder if provided
   if (
     parentFolderId !== undefined &&
-    parentFolderId !==
-      (file.parentFolderId ? file.parentFolderId.toString() : null)
+    parentFolderId !== file.parentFolderId?.toString()
   ) {
     // If moving to a specific folder, verify it exists and belongs to user
     if (parentFolderId) {
@@ -1017,8 +945,7 @@ exports.updateFile = asyncHandler(async (req, res) => {
         tagsChanged: tags !== undefined,
         parentFolderChanged:
           parentFolderId !== undefined &&
-          parentFolderId !==
-            (file.parentFolderId ? file.parentFolderId.toString() : null),
+          parentFolderId !== file.parentFolderId?.toString(),
       },
       originalSize: file.size,
       type: file.type,
@@ -1036,259 +963,88 @@ exports.updateFile = asyncHandler(async (req, res) => {
   });
 });
 
-// ✅ Update file content (replace old file with new file)
 // @desc    Update file content (replace old file with new file)
 // @route   PUT /api/files/:id/content
 // @access  Private
 exports.updateFileContent = asyncHandler(async (req, res) => {
   const fileId = req.params.id;
   const userId = req.user._id;
+  const newFile = req.file; // New file from multer middleware
 
-  console.log("📝 Updating file content:", fileId, "for user:", userId);
-
-  // ✅ التحقق من وجود الملف - جلب مع sharedWith للتأكد من حالة المشاركة
-  const file = await File.findOne({ _id: fileId, userId: userId });
-
-  if (!file) {
-    console.log("❌ File not found:", fileId);
-    return res.status(404).json({
-      success: false,
-      message: "File not found",
-    });
+  if (!newFile) {
+    return res.status(400).json({ message: "No file uploaded" });
   }
 
-  // ✅ التأكد من أن sharedWith محمّل بشكل صحيح
-  // إذا كان sharedWith array فارغ أو undefined، تحقق من isShared
-  const hasSharedUsers =
-    file.sharedWith &&
-    Array.isArray(file.sharedWith) &&
-    file.sharedWith.length > 0;
+  // Find existing file
+  const existingFile = await File.findOne({ _id: fileId, userId: userId });
 
-  // ✅ التحقق من وجود ملف جديد في الطلب
-  if (!req.file) {
-    console.log("❌ No file uploaded");
-    return res.status(400).json({
-      success: false,
-      message: "No file uploaded",
-    });
-  }
-
-  // ✅ تحديد وضع التحديث: replace (استبدال) أو new (نسخة جديدة)
-  // للملفات النصية: دائماً replace
-  // للملفات المشتركة: دائماً replace (حتى للصور) حتى يظهر التحديث للمستخدمين المشاركين
-  // للصور: افتراضياً replace (ما لم يحدد المستخدم خلاف ذلك صراحة)
-  // للملفات الأخرى: حسب replaceMode في body
-  const isTextFile =
-    file.category === "Documents" ||
-    (file.type && file.type.startsWith("text/")) ||
-    [".txt", ".md", ".json", ".xml", ".csv"].some(
-      (ext) => file.name && file.name.toLowerCase().endsWith(ext)
-    );
-
-  // ✅ إذا كان الملف مشاركاً، استخدم replace mode تلقائياً حتى للصور
-  // التحقق من isShared flag أو وجود مستخدمين في sharedWith
-  const isShared = file.isShared === true || hasSharedUsers;
-
-  // ✅ تحديد إذا كان الملف صورة
-  const isImage =
-    file.category === "Images" || (file.type && file.type.startsWith("image/"));
-
-  console.log("🔍 File sharing check:", {
-    isSharedFlag: file.isShared,
-    sharedWithLength: file.sharedWith ? file.sharedWith.length : 0,
-    hasSharedUsers: hasSharedUsers,
-    finalIsShared: isShared,
-    isImage: isImage,
-  });
-
-  // ✅ قراءة replaceMode من body (قد يكون string "true"/"false" أو boolean)
-  // في multipart/form-data، قد يكون string
-  const requestedReplaceMode = req.body.replaceMode;
-  let replaceModeValue = null;
-
-  if (requestedReplaceMode !== undefined && requestedReplaceMode !== null) {
-    // إذا كان string "true" أو boolean true
-    if (requestedReplaceMode === "true" || requestedReplaceMode === true) {
-      replaceModeValue = true;
+  if (!existingFile) {
+    // Delete the uploaded file if file not found
+    if (fs.existsSync(newFile.path)) {
+      fs.unlinkSync(newFile.path);
     }
-    // إذا كان string "false" أو boolean false
-    else if (
-      requestedReplaceMode === "false" ||
-      requestedReplaceMode === false
-    ) {
-      replaceModeValue = false;
-    }
+    return res.status(404).json({ message: "File not found" });
   }
-
-  // ✅ تحديد replaceMode:
-  // 1. الملفات النصية: دائماً replace
-  // 2. الملفات المشتركة: دائماً replace
-  // 3. الصور: افتراضياً replace (ما لم يحدد المستخدم false صراحة)
-  // 4. الملفات الأخرى: حسب replaceMode في body
-  let replaceMode;
-  if (isTextFile || isShared) {
-    replaceMode = true;
-  } else if (isImage) {
-    // للصور: replace افتراضياً ما لم يحدد false صراحة
-    replaceMode = replaceModeValue !== false;
-  } else {
-    // للملفات الأخرى: فقط إذا حدد true صراحة
-    replaceMode = replaceModeValue === true;
-  }
-
-  console.log("🔍 Replace mode decision:", {
-    isTextFile,
-    isShared,
-    isImage,
-    requestedReplaceMode,
-    replaceModeValue,
-    finalReplaceMode: replaceMode,
-  });
-
-  const oldFilePath = file.path;
-  const oldFileSize = file.size;
-  const oldFileType = file.type;
-  const oldCategory = file.category;
-  const oldFileName = file.name;
-  const newFilePath = req.file.path; // الملف الجديد الذي تم رفعه
-  const newFileSize = req.file.size;
-  const newFileType = req.file.mimetype;
-  const newFileName = req.file.originalname || file.name;
-
-  console.log("📄 Old file path:", oldFilePath);
-  console.log("📄 New file path:", newFilePath);
-  console.log("📄 Replace mode:", replaceMode);
-  console.log("📄 Is text file:", isTextFile);
-  console.log("📄 Is shared:", isShared);
 
   try {
-    let finalFilePath = newFilePath;
-    let finalFileName = newFileName;
+    const oldFilePath = existingFile.path;
+    const oldSize = existingFile.size;
+    const oldType = existingFile.type;
+    const oldParentFolderId = existingFile.parentFolderId;
 
-    if (replaceMode) {
-      // ✅ وضع الاستبدال: حذف القديم ووضع الجديد بنفس الاسم والمسار
-      console.log("🔄 Replace mode: Keeping same name and path");
+    // Determine new category
+    const category = getCategoryByExtension(newFile.originalname, newFile.mimetype);
 
-      // ✅ حذف الملف القديم
-      if (oldFilePath && fs.existsSync(oldFilePath)) {
-        try {
-          fs.unlinkSync(oldFilePath);
-          console.log("✅ Deleted old file:", oldFilePath);
-        } catch (deleteError) {
-          console.warn("⚠️ Could not delete old file:", deleteError.message);
-        }
+    // Update file record
+    existingFile.type = newFile.mimetype;
+    existingFile.size = newFile.size;
+    existingFile.path = newFile.path;
+    existingFile.category = category;
+    existingFile.updatedAt = new Date();
+
+    // Delete old file from disk if it exists and is different from new file
+    if (oldFilePath && oldFilePath !== newFile.path && fs.existsSync(oldFilePath)) {
+      try {
+        fs.unlinkSync(oldFilePath);
+      } catch (err) {
+        console.error("Error deleting old file:", err);
       }
-
-      // ✅ نسخ الملف الجديد إلى مكان الملف القديم بنفس الاسم
-      const finalPath = oldFilePath; // استخدام نفس مسار الملف القديم
-      const finalDir = path.dirname(finalPath);
-
-      // ✅ التأكد من وجود المجلد
-      if (!fs.existsSync(finalDir)) {
-        fs.mkdirSync(finalDir, { recursive: true });
-      }
-
-      // ✅ نسخ الملف الجديد إلى المكان القديم
-      // استخدام readFileSync/writeFileSync للتأكد من التوافق
-      const fileContent = fs.readFileSync(newFilePath);
-      fs.writeFileSync(finalPath, fileContent);
-
-      // ✅ حذف الملف المؤقت الجديد
-      if (fs.existsSync(newFilePath) && newFilePath !== finalPath) {
-        try {
-          fs.unlinkSync(newFilePath);
-          console.log("✅ Deleted temporary new file:", newFilePath);
-        } catch (err) {
-          console.warn("⚠️ Could not delete temporary file:", err.message);
-        }
-      }
-
-      finalFilePath = finalPath;
-      finalFileName = oldFileName; // ✅ الحفاظ على نفس الاسم
-    } else {
-      // ✅ وضع النسخة الجديدة: حذف القديم فقط، الملف الجديد يبقى في مكانه الجديد
-      console.log("📝 New version mode: Creating new file");
-
-      // ✅ حذف الملف القديم
-      if (oldFilePath && fs.existsSync(oldFilePath)) {
-        try {
-          fs.unlinkSync(oldFilePath);
-          console.log("✅ Deleted old file:", oldFilePath);
-        } catch (deleteError) {
-          console.warn("⚠️ Could not delete old file:", deleteError.message);
-        }
-      }
-
-      // ✅ الملف الجديد يبقى في مكانه الجديد (newFilePath)
-      finalFilePath = newFilePath;
-      finalFileName = newFileName;
     }
 
-    // ✅ تحديد category جديد بناءً على نوع الملف الجديد
-    const newCategory = getCategoryByExtension(finalFileName, newFileType);
+    await existingFile.save();
 
-    // ✅ تحديث معلومات الملف في قاعدة البيانات باستخدام findByIdAndUpdate
-    // ✅ هذا يضمن تحديث الملف الموجود وليس إنشاء ملف جديد
-    const updateData = {
-      path: finalFilePath,
-      size: newFileSize,
-      type: newFileType,
-      category: newCategory,
-      name: finalFileName, // ✅ اسم الملف (قد يكون القديم أو الجديد حسب replaceMode)
-      updatedAt: new Date(),
-      // ✅ إعادة تعيين حالة المعالجة لأن الملف تغير
-      isProcessed: false,
-      processedAt: null,
-      extractedText: null,
-      embedding: null,
-      summary: null,
-    };
-
-    // ✅ استخدام findByIdAndUpdate للتأكد من تحديث الملف الموجود فقط
-    const updatedFile = await File.findByIdAndUpdate(
-      fileId,
-      { $set: updateData },
-      { new: true, runValidators: true }
-    );
-
-    if (!updatedFile) {
-      throw new Error("Failed to update file in database");
+    // Update parent folder size if file is in a folder
+    if (oldParentFolderId) {
+      await updateFolderSize(oldParentFolderId);
     }
 
-    // ✅ تحديث حجم المجلد إذا كان الملف داخل مجلد
-    if (updatedFile.parentFolderId) {
-      await updateFolderSize(updatedFile.parentFolderId);
-    }
-
-    // ✅ معالجة الملف الجديد في الخلفية (استخراج نص، توليد embedding، تلخيص)
-    processFile(updatedFile._id)
+    // Trigger background processing for the new file content
+    processFile(existingFile._id)
       .then(() => {
         console.log(
-          `✅ Background processing completed for updated file: ${updatedFile.name}`
+          `✅ Background processing completed for updated file: ${existingFile.name}`
         );
       })
       .catch((err) => {
         console.error(
-          `❌ Background processing error for updated file ${updatedFile.name} (${updatedFile._id}):`,
+          `❌ Background processing error for updated file ${existingFile.name}:`,
           err.message
         );
-        console.error("Full error:", err);
       });
 
-    // ✅ تسجيل النشاط
+    // Log activity
     await logActivity(
       userId,
       "file_content_updated",
       "file",
-      updatedFile._id,
-      updatedFile.name,
+      existingFile._id,
+      existingFile.name,
       {
-        oldSize: oldFileSize,
-        newSize: newFileSize,
-        oldType: oldFileType,
-        newType: newFileType,
-        oldCategory: oldCategory,
-        newCategory: newCategory,
+        oldSize: oldSize,
+        newSize: newFile.size,
+        oldType: oldType,
+        newType: newFile.mimetype,
+        category: category,
       },
       {
         ipAddress: req.ip,
@@ -1296,58 +1052,20 @@ exports.updateFileContent = asyncHandler(async (req, res) => {
       }
     );
 
-    console.log("✅ File content updated successfully:", fileId);
-    console.log("✅ Updated file ID:", updatedFile._id);
-    console.log("✅ File path:", updatedFile.path);
-    console.log("✅ File name:", updatedFile.name);
-
     res.status(200).json({
-      success: true,
-      message: replaceMode
-        ? "تم استبدال الملف بنجاح (نفس الاسم والمسار)"
-        : "تم تحديث الملف بنجاح (نسخة جديدة)",
-      file: updatedFile,
-      replaceMode: replaceMode,
-      isShared: isShared,
-      sharedWithCount:
-        hasSharedUsers && updatedFile.sharedWith
-          ? updatedFile.sharedWith.length
-          : 0,
-      updatedAt: updatedFile.updatedAt,
-      // ✅ إضافة timestamp للاستخدام في cache busting في Flutter
-      updatedAtTimestamp: updatedFile.updatedAt
-        ? updatedFile.updatedAt.getTime()
-        : Date.now(),
+      message: "✅ File content updated successfully",
+      file: existingFile,
     });
   } catch (error) {
-    // ✅ في حالة الخطأ، حذف الملف الجديد إذا تم رفعه
-    if (newFilePath && fs.existsSync(newFilePath)) {
+    // Delete the uploaded file on error
+    if (fs.existsSync(newFile.path)) {
       try {
-        fs.unlinkSync(newFilePath);
-        console.log("🧹 Cleaned up new file due to error");
-      } catch (cleanupError) {
-        console.error("❌ Error cleaning up new file:", cleanupError);
+        fs.unlinkSync(newFile.path);
+      } catch (err) {
+        console.error("Error cleaning up uploaded file:", err);
       }
     }
-
-    // ✅ إذا كان في وضع replace وحاولنا نسخ الملف، حذف الملف المنسوخ أيضاً
-    if (replaceMode && oldFilePath && fs.existsSync(oldFilePath)) {
-      try {
-        // التحقق من أن هذا ليس نفس الملف القديم الأصلي
-        const stats = fs.statSync(oldFilePath);
-        if (stats.mtimeMs > Date.now() - 5000) {
-          // تم إنشاؤه/تعديله في آخر 5 ثواني
-          fs.unlinkSync(oldFilePath);
-          console.log("🧹 Cleaned up replaced file due to error");
-        }
-      } catch (cleanupError) {
-        console.error("❌ Error cleaning up replaced file:", cleanupError);
-      }
-    }
-
-    console.error("❌ Error updating file content:", error);
     res.status(500).json({
-      success: false,
       message: "Error updating file content",
       error: error.message,
     });
@@ -2221,10 +1939,68 @@ async function calculateRootStats(userId) {
 
   return categories.map((cat) => ({
     category: cat,
-    filesCount: (map.get(cat) && map.get(cat).filesCount) || 0,
-    totalSize: (map.get(cat) && map.get(cat).totalSize) || 0,
+    filesCount: map.get(cat)?.filesCount || 0,
+    totalSize: map.get(cat)?.totalSize || 0,
   }));
 }
+
+// @desc    View file (serve file for viewing in browser)
+// @route   GET /api/files/:id/view
+// @access  Private
+exports.viewFile = asyncHandler(async (req, res, next) => {
+  const fileId = req.params.id;
+  const userId = req.user._id;
+
+  // Find file
+  const file = await File.findById(fileId);
+  if (!file) {
+    return next(new ApiError("File not found", 404));
+  }
+
+  // Check if user owns the file
+  if (file.userId.toString() !== userId.toString()) {
+    return next(new ApiError("Access denied. You don't own this file", 403));
+  }
+
+  // Check if file is deleted
+  if (file.isDeleted) {
+    return next(new ApiError("File not found (deleted)", 404));
+  }
+
+  // Check if file exists on disk
+  const filePath = file.path;
+  if (!fs.existsSync(filePath)) {
+    return next(new ApiError("File not found on server", 404));
+  }
+
+  // Log activity
+  await logActivity(
+    userId,
+    "file_viewed",
+    "file",
+    file._id,
+    file.name,
+    {},
+    {
+      ipAddress: req.ip,
+      userAgent: req.get("User-Agent"),
+    }
+  );
+
+  // Set appropriate headers for viewing
+  res.setHeader("Content-Type", file.type || "application/octet-stream");
+  res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
+
+  // Send file for viewing
+  res.sendFile(path.resolve(filePath), (err) => {
+    if (err) {
+      console.error("Error viewing file:", err);
+      if (!res.headersSent) {
+        return next(new ApiError("Error viewing file", 500));
+      }
+    }
+  });
+});
 
 // @desc    Download file (user's own file)
 // @route   GET /api/files/:id/download
@@ -2275,102 +2051,6 @@ exports.downloadFile = asyncHandler(async (req, res, next) => {
       console.error("Error downloading file:", err);
       if (!res.headersSent) {
         return next(new ApiError("Error downloading file", 500));
-      }
-    }
-  });
-});
-
-// @desc    View file (open in browser/app without download)
-// @route   GET /api/files/:id/view
-// @access  Private
-exports.viewFile = asyncHandler(async (req, res, next) => {
-  const fileId = req.params.id;
-  const userId = req.user._id;
-
-  // Find file
-  const file = await File.findById(fileId).populate(
-    "sharedWith.user",
-    "name email"
-  );
-
-  if (!file) {
-    return next(new ApiError("File not found", 404));
-  }
-
-  // Check if user owns the file or has access
-  const isOwner = file.userId.toString() === userId.toString();
-  const isSharedWith = file.sharedWith.some((sw) => {
-    const userIdInShared =
-      (sw.user && sw.user._id && sw.user._id.toString()) ||
-      (sw.user && sw.user.toString());
-    return userIdInShared === userId.toString();
-  });
-
-  if (!isOwner && !isSharedWith) {
-    return next(
-      new ApiError("Access denied. You don't have access to this file", 403)
-    );
-  }
-
-  // Check if file is deleted
-  if (file.isDeleted) {
-    return next(new ApiError("File not found (deleted)", 404));
-  }
-
-  // Check if file exists on disk
-  const filePath = file.path;
-  if (!fs.existsSync(filePath)) {
-    return next(new ApiError("File not found on server", 404));
-  }
-
-  // Log activity
-  await logActivity(
-    userId,
-    "file_viewed",
-    "file",
-    file._id,
-    file.name,
-    {},
-    {
-      ipAddress: req.ip,
-      userAgent: req.get("User-Agent"),
-    }
-  );
-
-  // Set appropriate headers for viewing (not downloading)
-  const mimeType = file.type || "application/octet-stream";
-  res.setHeader("Content-Type", mimeType);
-  res.setHeader(
-    "Content-Disposition",
-    `inline; filename="${encodeURIComponent(file.name)}"`
-  );
-  res.setHeader("X-Content-Type-Options", "nosniff");
-
-  // ✅ للصور المشتركة: منع الـ cache لضمان ظهور التحديثات
-  // ✅ للصور غير المشتركة: استخدام cache عادي
-  const isSharedFile =
-    file.isShared === true || (file.sharedWith && file.sharedWith.length > 0);
-  const isImage = file.category === "Images" || mimeType.startsWith("image/");
-
-  if (isSharedFile && isImage) {
-    // ✅ منع الـ cache للصور المشتركة لضمان ظهور التحديثات
-    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
-    // ✅ إضافة ETag بناءً على updatedAt لمساعدة المتصفح في التحقق من التحديثات
-    const etag = `"${file._id}-${file.updatedAt ? file.updatedAt.getTime() : Date.now()}"`;
-    res.setHeader("ETag", etag);
-  } else {
-    // ✅ استخدام cache عادي للملفات الأخرى
-    res.setHeader("Cache-Control", "public, max-age=3600");
-  }
-
-  // Send file for viewing
-  res.sendFile(path.resolve(filePath), (err) => {
-    if (err) {
-      console.error("Error viewing file:", err);
-      if (!res.headersSent) {
-        return next(new ApiError("Error viewing file", 500));
       }
     }
   });
