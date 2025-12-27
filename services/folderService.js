@@ -9,6 +9,43 @@ const { logActivity } = require("./activityLogService");
 const fs = require("fs");
 const path = require("path");
 
+// ✅ Folder Access Sessions - لحفظ حالة التحقق من الوصول للمجلدات المحمية
+// Key format: `${userId}_${folderId}`
+// Value: expiry timestamp (in milliseconds)
+const folderAccessSessions = new Map();
+const FOLDER_ACCESS_SESSION_DURATION = 30 * 60 * 1000; // 30 دقيقة
+
+// ✅ Helper function to check and clean expired sessions
+function getFolderAccessSession(userId, folderId) {
+  const key = `${userId}_${folderId}`;
+  const expiryTime = folderAccessSessions.get(key);
+
+  if (!expiryTime) {
+    return false;
+  }
+
+  // Check if session has expired
+  if (Date.now() > expiryTime) {
+    folderAccessSessions.delete(key);
+    return false;
+  }
+
+  return true;
+}
+
+// ✅ Helper function to set folder access session
+function setFolderAccessSession(userId, folderId) {
+  const key = `${userId}_${folderId}`;
+  const expiryTime = Date.now() + FOLDER_ACCESS_SESSION_DURATION;
+  folderAccessSessions.set(key, expiryTime);
+}
+
+// ✅ Helper function to clear folder access session
+function clearFolderAccessSession(userId, folderId) {
+  const key = `${userId}_${folderId}`;
+  folderAccessSessions.delete(key);
+}
+
 // ✅ Helper function to generate unique folder name
 async function generateUniqueFolderName(baseName, parentId, userId) {
   let finalName = baseName;
@@ -1846,6 +1883,9 @@ exports.verifyFolderAccess = asyncHandler(async (req, res, next) => {
     );
   }
 
+  // ✅ حفظ session للوصول بعد التحقق الناجح
+  setFolderAccessSession(userId.toString(), folderId.toString());
+
   res.status(200).json({
     message: "✅ Access granted",
     hasAccess: true,
@@ -1899,6 +1939,9 @@ exports.removeFolderProtection = asyncHandler(async (req, res, next) => {
   folder.passwordHash = null;
 
   await folder.save();
+
+  // ✅ مسح session للوصول بعد إزالة الحماية
+  clearFolderAccessSession(userId.toString(), folderId.toString());
 
   // Log activity
   await logActivity(
@@ -1957,12 +2000,70 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
     return next();
   }
 
-  // ✅ المجلد محمي - يتطلب التحقق
-  // Check if access token is provided in headers (for biometric or session-based access)
-  const accessToken = req.headers["x-folder-access-token"];
+  // ✅ المجلد محمي - التحقق من session أو كلمة المرور
+  // Check if user has valid access session
+  const hasValidSession = getFolderAccessSession(
+    userId.toString(),
+    folderId.toString()
+  );
 
-  // For now, we'll require explicit verification via verify-access endpoint
-  // In a more advanced implementation, you could use session tokens
+  if (hasValidSession) {
+    // ✅ المستخدم لديه session صالحة - السماح بالوصول
+    return next();
+  }
+
+  // ✅ إذا لم تكن هناك session صالحة، التحقق من كلمة المرور في header أو body
+  const password = req.headers["x-folder-password"] || req.body.password;
+  const biometricToken =
+    req.headers["x-folder-biometric-token"] || req.body.biometricToken;
+
+  if (password || biometricToken) {
+    // ✅ التحقق من كلمة المرور
+    const folderWithPassword = await Folder.findOne({
+      _id: folderId,
+      userId: userId,
+    }).select("+passwordHash");
+
+    if (!folderWithPassword) {
+      return next(new ApiError("Folder not found", 404));
+    }
+
+    let hasAccess = false;
+
+    if (folderWithPassword.protectionType === "password") {
+      if (!password) {
+        return next(
+          new ApiError("Folder is protected. Please verify access first", 403)
+        );
+      }
+
+      if (!folderWithPassword.passwordHash) {
+        return next(
+          new ApiError("Folder protection is not properly configured", 500)
+        );
+      }
+
+      hasAccess = await bcrypt.compare(
+        password,
+        folderWithPassword.passwordHash
+      );
+    } else if (folderWithPassword.protectionType === "biometric") {
+      if (!biometricToken) {
+        return next(
+          new ApiError("Folder is protected. Please verify access first", 403)
+        );
+      }
+      hasAccess = !!biometricToken;
+    }
+
+    if (hasAccess) {
+      // ✅ حفظ session بعد التحقق الناجح
+      setFolderAccessSession(userId.toString(), folderId.toString());
+      return next();
+    }
+  }
+
+  // ✅ لا يوجد session ولا كلمة مرور صحيحة - رفض الوصول
   return next(
     new ApiError("Folder is protected. Please verify access first", 403)
   );
