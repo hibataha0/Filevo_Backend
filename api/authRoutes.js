@@ -1,32 +1,26 @@
-const express =require('express');
+const express = require('express');
 const {
   signupValidator,
   loginValidator,
 } = require('../utils/validators/authValidator');
 
-const { registerUser,
-        login,
-        googleLogin,
-        forgotPassword,
-        verifyPassResetCode,
-        resetPassword,
-        verifyEmailCode,
-        resendVerificationCode} = require('../services/authService');
-
+const {
+  registerUser,
+  login,
+  forgotPassword,
+  verifyPassResetCode,
+  resetPassword,
+} = require('../services/authService');
 
 const router = express.Router();
 
 // 🔹 Signup route
-router.post('/registerUser',signupValidator, registerUser);
+router.post('/registerUser', signupValidator, registerUser);
 
-// ✅ Email verification routes
-router.post('/verifyEmail', verifyEmailCode);
-router.post('/resendVerificationCode', resendVerificationCode);
-
+// 🔹 Login route
 router.post('/login', loginValidator, login);
 
-// ✅ Google Login/Signup route
-router.post('/google', googleLogin);
+// 🔹 Password reset routes
 router.post('/forgotPassword', forgotPassword);
 router.post('/verifyResetCode', verifyPassResetCode);
 router.put('/resetPassword', resetPassword);

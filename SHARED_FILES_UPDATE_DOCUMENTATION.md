@@ -151,3 +151,4 @@ const replaceMode = isTextFile || isShared
 
 
 
+
