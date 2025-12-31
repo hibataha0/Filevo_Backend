@@ -1342,6 +1342,13 @@ exports.shareFolderWithRoom = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Folder not found", 404));
   }
 
+  // Check if folder is protected - protected folders cannot be shared with rooms
+  if (folder.isProtected) {
+    return next(
+      new ApiError("Protected folders cannot be shared with rooms", 403)
+    );
+  }
+
   // Check if folder is already shared with this room
   const alreadyShared = room.folders.find(
     (f) => f.folderId.toString() === folderId
@@ -1461,6 +1468,14 @@ exports.addComment = asyncHandler(async (req, res, next) => {
       userAgent: req.get("User-Agent"),
     }
   );
+
+  // Emit new comment to all room members via Socket.IO
+  // eslint-disable-next-line global-require
+  const { emitNewComment } = require("../socket");
+  const io = global.io;
+  if (io) {
+    emitNewComment(io, roomId, comment);
+  }
 
   res.status(201).json({
     message: "✅ Comment added",

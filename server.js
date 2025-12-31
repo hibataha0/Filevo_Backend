@@ -23,6 +23,7 @@ const dbConnection = require("./config/database");
 const globalError = require("./middlewares/errMiddlewarel");
 const roomService = require("./services/roomService");
 const { checkHFConnection } = require("./services/aiService");
+const { initializeSocketIO } = require("./socket");
 
 // connect with db
 dbConnection();
@@ -181,6 +182,15 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   scheduleInvitationCleanup();
   checkHFOnStartup();
 });
+
+// ======================
+// 🔌 INITIALIZE SOCKET.IO
+// ======================
+const io = initializeSocketIO(server);
+console.log("✅ Socket.IO initialized");
+
+// Make io available globally for use in other modules
+global.io = io;
 
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (err) => {
