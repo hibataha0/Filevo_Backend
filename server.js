@@ -192,8 +192,51 @@ console.log("✅ Socket.IO initialized");
 // Make io available globally for use in other modules
 global.io = io;
 
-// Handle unhandled promise rejections
+// ======================
+// 🛡️ ERROR HANDLING - منع توقف السيرفر
+// ======================
+
+// Handle unhandled promise rejections - لا توقف السيرفر
 process.on("unhandledRejection", (err) => {
-  console.error(`UnhandledRejection: ${err.name} | ${err.message}`);
-  server.close(() => process.exit(1));
+  console.error("❌ Unhandled Promise Rejection:");
+  console.error(`   Error: ${err.name || "Unknown"}`);
+  console.error(`   Message: ${err.message || err}`);
+  if (err.stack) {
+    console.error(`   Stack: ${err.stack}`);
+  }
+  // ✅ لا نوقف السيرفر - فقط نعرض الخطأ ونكمل العمل
+  // هذا يمنع توقف الباك إند عند حدوث أخطاء غير متوقعة
+});
+
+// Handle uncaught exceptions - توقف نظيف فقط للحالات الخطيرة
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception (Critical Error):");
+  console.error(`   Error: ${err.name || "Unknown"}`);
+  console.error(`   Message: ${err.message || err}`);
+  if (err.stack) {
+    console.error(`   Stack: ${err.stack}`);
+  }
+  // ✅ للأخطاء الحرجة فقط - نوقف السيرفر بشكل نظيف
+  console.error("⚠️  Server will shut down due to critical error...");
+  server.close(() => {
+    console.error("Server closed");
+    process.exit(1);
+  });
+});
+
+// Graceful shutdown عند إرسال إشارات التوقف
+process.on("SIGTERM", () => {
+  console.log("⚠️  SIGTERM received. Shutting down gracefully...");
+  server.close(() => {
+    console.log("✅ Server closed");
+    process.exit(0);
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("⚠️  SIGINT received. Shutting down gracefully...");
+  server.close(() => {
+    console.log("✅ Server closed");
+    process.exit(0);
+  });
 });

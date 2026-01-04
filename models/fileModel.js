@@ -2,23 +2,10 @@ const mongoose = require("mongoose");
 
 const fileSchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    type: {
-      type: String,
-      required: true,
-    },
-    size: {
-      type: Number,
-      required: true,
-    },
-    path: {
-      type: String,
-      required: true,
-    },
+    name: { type: String, required: true, trim: true },
+    type: { type: String, required: true },
+    size: { type: Number, required: true },
+    path: { type: String, required: true },
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -29,6 +16,7 @@ const fileSchema = new mongoose.Schema(
       ref: "Folder",
       default: null,
     },
+
     category: {
       type: String,
       enum: [
@@ -43,10 +31,8 @@ const fileSchema = new mongoose.Schema(
       ],
       required: true,
     },
-    isShared: {
-      type: Boolean,
-      default: false,
-    },
+
+    isShared: { type: Boolean, default: false },
     sharedWith: [
       {
         user: {
@@ -58,126 +44,62 @@ const fileSchema = new mongoose.Schema(
           type: String,
           enum: ["view", "edit", "delete"],
           default: "view",
-          required: true,
         },
-        sharedAt: {
-          type: Date,
-          default: Date.now,
-        },
+        sharedAt: { type: Date, default: Date.now },
       },
     ],
-    isDeleted: {
-      type: Boolean,
-      default: false,
-    },
-    deletedAt: {
-      type: Date,
-      default: null,
-    },
-    deleteExpiryDate: {
-      type: Date,
-      default: null,
-    },
-    isStarred: {
-      type: Boolean,
-      default: false,
-    },
-    description: {
-      type: String,
-      trim: true,
-      default: "",
-    },
-    tags: [
-      {
-        type: String,
-        trim: true,
-      },
-    ],
+
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null },
+    deleteExpiryDate: { type: Date, default: null },
+    isStarred: { type: Boolean, default: false },
+    description: { type: String, trim: true, default: "" },
+    tags: [{ type: String, trim: true }],
+
     // ✅ حقول البحث الذكي
-    extractedText: {
-      type: String,
-      default: null,
-      sparse: true,
-    },
-    embedding: {
-      type: [Number],
-      default: null,
-      sparse: true,
-    },
-    summary: {
-      type: String,
-      default: null,
-      sparse: true,
-    },
-    isProcessed: {
-      type: Boolean,
-      default: false,
-    },
-    processedAt: {
-      type: Date,
-      default: null,
-    },
-    textExtractionError: {
-      type: String,
-      default: null,
-    },
-    embeddingError: {
-      type: String,
-      default: null,
-    },
-    // ✅ حقول بيانات الصور
-    imageDescription: {
-      type: String,
-      default: null,
-      sparse: true,
-    },
-    imageObjects: {
-      type: [String],
-      default: [],
-    },
-    imageScene: {
-      type: String,
-      default: null,
-      sparse: true,
-    },
-    imageColors: {
-      type: [String],
-      default: [],
-    },
-    imageMood: {
-      type: String,
-      default: null,
-      sparse: true,
-    },
-    imageText: {
-      type: String,
-      default: null,
-      sparse: true,
-    },
-    // ✅ حقول بيانات الصوت
-    audioTranscript: {
-      type: String,
-      default: null,
-      sparse: true,
-    },
-    // ✅ حقول بيانات الفيديو
-    videoTranscript: {
-      type: String,
-      default: null,
-      sparse: true,
-    },
-    videoScenes: {
-      type: [String],
-      default: [],
-    },
-    videoDescription: {
-      type: String,
-      default: null,
-      sparse: true,
-    },
+    extractedText: { type: String, default: null, sparse: true },
+    embedding: { type: [Number], default: null, sparse: true },
+    summary: { type: String, default: null, sparse: true },
+    isProcessed: { type: Boolean, default: false },
+    processedAt: { type: Date, default: null },
+    textExtractionError: { type: String, default: null },
+    embeddingError: { type: String, default: null },
+
+    // ✅ بيانات الصور
+    imageDescription: { type: String, default: null, sparse: true },
+    imageObjects: { type: [String], default: [] },
+    imageScene: { type: String, default: null, sparse: true },
+    imageColors: { type: [String], default: [] },
+    imageMood: { type: String, default: null, sparse: true },
+    imageText: { type: String, default: null, sparse: true },
+
+    // ✅ بيانات الصوت
+    audioTranscript: { type: String, default: null, sparse: true },
+
+    // ✅ بيانات الفيديو
+    videoTranscript: { type: String, default: null, sparse: true },
+    videoScenes: { type: [String], default: [] },
+    videoDescription: { type: String, default: null, sparse: true },
   },
   { timestamps: true }
 );
+
+// ✅ Indexes لتحسين الأداء
+fileSchema.index({ userId: 1, isDeleted: 1, createdAt: -1 });
+fileSchema.index({ parentFolderId: 1, isDeleted: 1, createdAt: -1 });
+fileSchema.index({ category: 1, isDeleted: 1 });
+
+// Text search
+fileSchema.index({
+  extractedText: "text",
+  summary: "text",
+  audioTranscript: "text",
+  videoTranscript: "text",
+  imageDescription: "text",
+  imageScene: "text",
+  imageMood: "text",
+  imageText: "text",
+});
 
 const File = mongoose.model("File", fileSchema);
 module.exports = File;

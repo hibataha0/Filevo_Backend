@@ -748,23 +748,55 @@ exports.getFolderContents = asyncHandler(async (req, res, next) => {
   const files = paginatedContents.filter((item) => item.type === "file");
 
   // ✅ حساب الحجم وعدد الملفات للمجلدات الفرعية المعروضة
-  const subfoldersWithDetails = await Promise.all(
+  // ✅ استخدام Promise.allSettled بدلاً من Promise.all لمنع توقف عند فشل مجلد واحد
+  const subfoldersDetailsResults = await Promise.allSettled(
     subfolders.map(async (subfolder) => {
-      const subfolderObj = { ...subfolder };
+      try {
+        const subfolderObj = { ...subfolder };
 
-      // ✅ حساب الحجم وعدد الملفات بشكل recursive
-      const size = await calculateFolderSizeRecursive(subfolder._id);
-      const filesCount = await calculateFolderFilesCountRecursive(
-        subfolder._id
-      );
+        // ✅ حساب الحجم وعدد الملفات بشكل recursive
+        const size = await calculateFolderSizeRecursive(subfolder._id);
+        const filesCount = await calculateFolderFilesCountRecursive(
+          subfolder._id
+        );
 
-      // ✅ تحديث القيم
-      subfolderObj.size = size;
-      subfolderObj.filesCount = filesCount;
+        // ✅ تحديث القيم
+        subfolderObj.size = size;
+        subfolderObj.filesCount = filesCount;
 
-      return subfolderObj;
+        return subfolderObj;
+      } catch (error) {
+        // ✅ في حالة فشل الحساب، نعيد المجلد بالقيم الافتراضية
+        console.error(
+          `⚠️ Error calculating stats for folder ${subfolder._id}:`,
+          error.message
+        );
+        return {
+          ...subfolder,
+          size: 0,
+          filesCount: 0,
+        };
+      }
     })
   );
+
+  // ✅ معالجة النتائج - نأخذ القيمة من fulfilled أو نستخدم القيم الافتراضية
+  const subfoldersWithDetails = subfoldersDetailsResults.map((result, index) => {
+    if (result.status === "fulfilled") {
+      return result.value;
+    } else {
+      // ✅ في حالة الفشل، نستخدم القيم الافتراضية
+      console.error(
+        `⚠️ Failed to get details for subfolder ${subfolders[index]._id}:`,
+        result.reason
+      );
+      return {
+        ...subfolders[index],
+        size: 0,
+        filesCount: 0,
+      };
+    }
+  });
 
   // ✅ تحديث paginatedContents مع القيم المحسوبة
   const updatedPaginatedContents = paginatedContents.map((item) => {
@@ -825,34 +857,56 @@ exports.getAllFolders = asyncHandler(async (req, res, next) => {
 
   // ✅ حساب الحجم وعدد الملفات لكل مجلد
   // ✅ استخدام calculateFolderStatsRecursive لأنها أكثر كفاءة (تحسب كل شيء في مرة واحدة)
-  const foldersWithDetails = await Promise.all(
+  // ✅ استخدام Promise.allSettled لمنع توقف عند فشل حساب مجلد واحد
+  const foldersDetailsResults = await Promise.allSettled(
     folders.map(async (folder) => {
-      // ✅ تحويل إلى plain object أولاً
-      const folderObj = folder.toObject ? folder.toObject() : { ...folder };
+      try {
+        // ✅ تحويل إلى plain object أولاً
+        const folderObj = folder.toObject ? folder.toObject() : { ...folder };
 
-      // ✅ حساب الإحصائيات بشكل recursive (أكثر كفاءة - يحسب الحجم والعدد معاً)
-      const stats = await calculateFolderStatsRecursive(folder._id);
-      const size = stats && stats.size !== undefined ? stats.size : 0;
-      const filesCount =
-        stats && stats.filesCount !== undefined ? stats.filesCount : 0;
+        // ✅ حساب الإحصائيات بشكل recursive (أكثر كفاءة - يحسب الحجم والعدد معاً)
+        const stats = await calculateFolderStatsRecursive(folder._id);
+        const size = stats && stats.size !== undefined ? stats.size : 0;
+        const filesCount =
+          stats && stats.filesCount !== undefined ? stats.filesCount : 0;
 
-      // // ✅ Log للتحقق من القيم المحسوبة
-      // console.log(`📁 Folder: ${folder.name} (${folder._id})`);
-      // console.log(`   ✅ Stats object:`, JSON.stringify(stats));
-      // console.log(`   ✅ Calculated Size: ${size} bytes (${(size / 1024 / 1024).toFixed(2)} MB)`);
-      // console.log(`   ✅ Calculated Files Count: ${filesCount}`);
+        // ✅ تحديث القيم في المجلد - التأكد من أنها أرقام وليست null
+        folderObj.size = Number(size) || 0;
+        folderObj.filesCount = Number(filesCount) || 0;
 
-      // ✅ تحديث القيم في المجلد - التأكد من أنها أرقام وليست null
-      folderObj.size = Number(size) || 0;
-      folderObj.filesCount = Number(filesCount) || 0;
-
-      // // ✅ Log للتحقق من القيم بعد الإضافة
-      // console.log(`   ✅ After update - folderObj.size: ${folderObj.size}, folderObj.filesCount: ${folderObj.filesCount}`);
-      // console.log(`   ✅ Final object keys:`, Object.keys(folderObj));
-
-      return folderObj;
+        return folderObj;
+      } catch (error) {
+        // ✅ في حالة فشل الحساب، نعيد المجلد بالقيم الافتراضية
+        console.error(
+          `⚠️ Error calculating stats for folder ${folder._id}:`,
+          error.message
+        );
+        const folderObj = folder.toObject ? folder.toObject() : { ...folder };
+        folderObj.size = 0;
+        folderObj.filesCount = 0;
+        return folderObj;
+      }
     })
   );
+
+  // ✅ معالجة النتائج - نأخذ القيمة من fulfilled أو نستخدم القيم الافتراضية
+  const foldersWithDetails = foldersDetailsResults.map((result, index) => {
+    if (result.status === "fulfilled") {
+      return result.value;
+    } else {
+      // ✅ في حالة الفشل، نستخدم القيم الافتراضية
+      console.error(
+        `⚠️ Failed to get details for folder ${folders[index]._id}:`,
+        result.reason
+      );
+      const folderObj = folders[index].toObject
+        ? folders[index].toObject()
+        : { ...folders[index] };
+      folderObj.size = 0;
+      folderObj.filesCount = 0;
+      return folderObj;
+    }
+  });
 
   // ✅ التحقق النهائي من القيم قبل الإرسال
   // console.log('📦 Final folders with details:');
@@ -966,27 +1020,56 @@ exports.getRecentFolders = asyncHandler(async (req, res, next) => {
     .limit(limit);
 
   // ✅ حساب الحجم وعدد الملفات لكل مجلد
-  const foldersWithDetails = await Promise.all(
+  // ✅ استخدام Promise.allSettled لمنع توقف عند فشل حساب مجلد واحد
+  const foldersDetailsResults = await Promise.allSettled(
     folders.map(async (folder) => {
-      const folderObj = folder.toObject();
+      try {
+        const folderObj = folder.toObject();
 
-      // ✅ حساب الحجم وعدد الملفات بشكل recursive
-      const size = await calculateFolderSizeRecursive(folder._id);
-      const filesCount = await calculateFolderFilesCountRecursive(folder._id);
+        // ✅ حساب الحجم وعدد الملفات بشكل recursive
+        const size = await calculateFolderSizeRecursive(folder._id);
+        const filesCount = await calculateFolderFilesCountRecursive(folder._id);
 
-      folderObj.size = size;
-      folderObj.filesCount = filesCount;
+        folderObj.size = size;
+        folderObj.filesCount = filesCount;
 
-      return folderObj;
+        return folderObj;
+      } catch (error) {
+        // ✅ في حالة فشل الحساب، نعيد المجلد بالقيم الافتراضية
+        console.error(
+          `⚠️ Error calculating stats for folder ${folder._id}:`,
+          error.message
+        );
+        const folderObj = folder.toObject();
+        folderObj.size = 0;
+        folderObj.filesCount = 0;
+        return folderObj;
+      }
     })
   );
+
+  // ✅ معالجة النتائج - نأخذ القيمة من fulfilled أو نستخدم القيم الافتراضية
+  const foldersWithDetails = foldersDetailsResults.map((result, index) => {
+    if (result.status === "fulfilled") {
+      return result.value;
+    } else {
+      // ✅ في حالة الفشل، نستخدم القيم الافتراضية
+      console.error(
+        `⚠️ Failed to get details for folder ${folders[index]._id}:`,
+        result.reason
+      );
+      const folderObj = folders[index].toObject();
+      folderObj.size = 0;
+      folderObj.filesCount = 0;
+      return folderObj;
+    }
+  });
 
   res.status(200).json({
     message: "Recent folders retrieved successfully",
     folders: foldersWithDetails,
   });
 });
-
 // @desc    Delete folder
 // @route   DELETE /api/folders/:id
 // @access  Private
@@ -1973,7 +2056,12 @@ exports.removeFolderProtection = asyncHandler(async (req, res, next) => {
 // @desc    Middleware to check folder protection before access
 // This will be used in routes that need folder access
 exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
-  const folderId = req.params.id || req.body.folderId || req.query.folderId;
+  // 🛡️ Ignore non-HTTP internal calls or missing request context
+  if (!req || !req.user) {
+    return next();
+  }
+
+  const folderId = req.params.id || (req.body && req.body.folderId) || req.query.folderId;
   const userId = req.user._id;
 
   if (!folderId) {
@@ -2013,9 +2101,10 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
   }
 
   // ✅ إذا لم تكن هناك session صالحة، التحقق من كلمة المرور في header أو body
-  const password = req.headers["x-folder-password"] || req.body.password;
+  // 🛡️ Safe access to req.body - check if it exists first
+  const password = req.headers["x-folder-password"] || (req.body && req.body.password);
   const biometricToken =
-    req.headers["x-folder-biometric-token"] || req.body.biometricToken;
+    req.headers["x-folder-biometric-token"] || (req.body && req.body.biometricToken);
 
   if (password || biometricToken) {
     // ✅ التحقق من كلمة المرور

@@ -481,11 +481,14 @@ exports.getRecentFiles = asyncHandler(async (req, res) => {
   const userId = req.user._id;
   const limit = parseInt(req.query.limit) || 10;
 
-  const files = await File.find({ userId })
+  // ✅ استخدام lean + اختيار الحقول المهمة فقط
+  const files = await File.find({ userId, isDeleted: false })
     .sort({ uploadedAt: -1 })
     .limit(limit)
+    .select("name type size parentFolderId userId uploadedAt") // ✅ يقلل حجم البيانات
     .populate("parentFolderId", "name")
-    .populate("userId", "name email");
+    .populate("userId", "name email")
+    .lean();
 
   res.status(200).json({
     message: "Recent files retrieved successfully",
@@ -993,7 +996,10 @@ exports.updateFileContent = asyncHandler(async (req, res) => {
     const oldParentFolderId = existingFile.parentFolderId;
 
     // Determine new category
-    const category = getCategoryByExtension(newFile.originalname, newFile.mimetype);
+    const category = getCategoryByExtension(
+      newFile.originalname,
+      newFile.mimetype
+    );
 
     // Update file record
     existingFile.type = newFile.mimetype;
@@ -1003,7 +1009,11 @@ exports.updateFileContent = asyncHandler(async (req, res) => {
     existingFile.updatedAt = new Date();
 
     // Delete old file from disk if it exists and is different from new file
-    if (oldFilePath && oldFilePath !== newFile.path && fs.existsSync(oldFilePath)) {
+    if (
+      oldFilePath &&
+      oldFilePath !== newFile.path &&
+      fs.existsSync(oldFilePath)
+    ) {
       try {
         fs.unlinkSync(oldFilePath);
       } catch (err) {
