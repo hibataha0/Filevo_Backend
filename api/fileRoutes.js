@@ -29,6 +29,7 @@ const {
   downloadFile,
   viewFile,
   downloadFolder,
+  getStorageInfo,
 } = require("../services/fileService");
 const { protect } = require("../services/authService");
 const {
@@ -80,6 +81,9 @@ router.get("/category/:category", protect, getFilesByCategory);
 
 // Get categories statistics
 router.get("/categories/stats", protect, getCategoriesStats);
+
+// Get storage information
+router.get("/storage", protect, getStorageInfo);
 
 // Get trash files
 router.get("/trash", protect, getTrashFiles);

@@ -18,6 +18,9 @@ const folderSchema = new mongoose.Schema(
     // ✅ الحجم الكلي وعدد الملفات (محسوب داخليًا)
     totalSize: { type: Number, default: 0 },
     totalFiles: { type: Number, default: 0 },
+    // ✅ الحجم وعدد الملفات (مخزنة مباشرة - بدون حساب recursive) - للحل السريع
+    size: { type: Number, default: 0 },
+    filesCount: { type: Number, default: 0 },
 
     isShared: { type: Boolean, default: false },
     sharedWith: [
@@ -67,14 +70,16 @@ const folderSchema = new mongoose.Schema(
 folderSchema.index({ userId: 1, isDeleted: 1, createdAt: -1 });
 folderSchema.index({ parentId: 1, isDeleted: 1 });
 folderSchema.index({ userId: 1, isDeleted: 1 });
+// ✅ Index محسّن للـ getFolderContents - DB-level pagination
+folderSchema.index({ parentId: 1, isDeleted: 1, createdAt: -1 });
 
 // ✅ Pre-save hook للتأكد من الاتساق
 folderSchema.pre("save", function (next) {
   if (!this.isProtected) {
     this.protectionType = "none";
     this.passwordHash = null;
-  } else {
-    if (this.protectionType === "none") this.protectionType = "password";
+  } else if (this.protectionType === "none") {
+    this.protectionType = "password";
   }
   next();
 });

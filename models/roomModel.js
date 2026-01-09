@@ -111,6 +111,8 @@ const roomSchema = new mongoose.Schema(
 roomSchema.index({ "members.user": 1, isActive: 1 });
 roomSchema.index({ owner: 1 });
 roomSchema.index({ createdAt: -1 });
+// ✅ Index لتحسين query البحث عن المجلدات في الـ rooms
+roomSchema.index({ "folders.folderId": 1, "members.user": 1, isActive: 1 });
 
 const Room = mongoose.model("Room", roomSchema);
 module.exports = Room;

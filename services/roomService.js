@@ -292,11 +292,24 @@ exports.sendInvitation = asyncHandler(async (req, res, next) => {
     status: "pending",
   });
 
-  await invitation.populate("receiver", "name email profileImg");
-  await invitation.populate("sender", "name email profileImg");
+  try {
+    await invitation.populate("receiver", "name email profileImg");
+    await invitation.populate("sender", "name email profileImg");
 
-  // Log activity
-  await logActivity(
+    // Transform profile images to full URLs
+    if (invitation.receiver) {
+      invitation.receiver = transformUserProfileImage(invitation.receiver, req);
+    }
+    if (invitation.sender) {
+      invitation.sender = transformUserProfileImage(invitation.sender, req);
+    }
+  } catch (populateError) {
+    console.error("Error populating invitation:", populateError);
+    // Continue even if populate fails
+  }
+
+  // Log activity (don't block response if logging fails)
+  logActivity(
     userId,
     "room_invitation_sent",
     "room",
@@ -311,7 +324,9 @@ exports.sendInvitation = asyncHandler(async (req, res, next) => {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
     }
-  );
+  ).catch((logError) => {
+    console.error("Error logging invitation activity:", logError);
+  });
 
   res.status(201).json({
     message: "✅ Invitation sent successfully",
@@ -1449,14 +1464,20 @@ exports.addComment = asyncHandler(async (req, res, next) => {
     content: content.trim(),
   });
 
-  await comment.populate("user", "name email profileImg");
+  try {
+    await comment.populate("user", "name email profileImg");
 
-  // Transform profile image to full URL
-  if (comment.user) {
-    comment.user = transformUserProfileImage(comment.user, req);
+    // Transform profile image to full URL
+    if (comment.user) {
+      comment.user = transformUserProfileImage(comment.user, req);
+    }
+  } catch (populateError) {
+    console.error("Error populating comment:", populateError);
+    // Continue even if populate fails
   }
 
-  await logActivity(
+  // Log activity (don't block response if logging fails)
+  logActivity(
     userId,
     "comment_added",
     targetType,
@@ -1467,14 +1488,21 @@ exports.addComment = asyncHandler(async (req, res, next) => {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
     }
-  );
+  ).catch((logError) => {
+    console.error("Error logging comment activity:", logError);
+  });
 
   // Emit new comment to all room members via Socket.IO
-  // eslint-disable-next-line global-require
-  const { emitNewComment } = require("../socket");
-  const io = global.io;
-  if (io) {
-    emitNewComment(io, roomId, comment);
+  try {
+    // eslint-disable-next-line global-require
+    const { emitNewComment } = require("../socket");
+    const io = global.io;
+    if (io) {
+      emitNewComment(io, roomId, comment);
+    }
+  } catch (socketError) {
+    console.error("Error emitting comment via Socket.IO:", socketError);
+    // Continue even if Socket.IO fails
   }
 
   res.status(201).json({
@@ -1955,19 +1983,80 @@ exports.downloadRoomFile = asyncHandler(async (req, res, next) => {
     return next(new ApiError("You must be a room member to view files", 403));
   }
 
-  // Find file entry
-  const fileEntry = room.files.find(
+  // Find file entry - check both direct files and files in shared folders
+  let fileEntry = room.files.find(
     (f) =>
       f.fileId &&
       (f.fileId._id ? f.fileId._id.toString() : f.fileId.toString()) === fileId
   );
-  if (!fileEntry) {
-    return next(new ApiError("File not shared in this room", 404));
+
+  let file = fileEntry ? fileEntry.fileId : null;
+
+  // ✅ إذا لم يكن الملف مباشرة في room.files، ابحث عنه في المجلدات المشتركة
+  if (!file) {
+    // Populate folders if not already populated
+    if (room.folders && room.folders.length > 0) {
+      if (!room.folders[0].folderId || !room.folders[0].folderId._id) {
+        await room.populate("folders.folderId");
+      }
+    }
+
+    // Get all shared folder IDs (including nested subfolders)
+    const getAllFolderIds = async (folderIds) => {
+      const allIds = [...folderIds];
+      const Folder = require("../models/folderModel");
+      
+      for (const folderId of folderIds) {
+        const subfolders = await Folder.find({
+          parentId: folderId,
+          isDeleted: false,
+        }).select("_id").lean();
+        
+        const subfolderIds = subfolders.map((sf) => sf._id.toString());
+        if (subfolderIds.length > 0) {
+          const nestedIds = await getAllFolderIds(subfolderIds);
+          allIds.push(...nestedIds);
+        }
+      }
+      
+      return [...new Set(allIds)]; // Remove duplicates
+    };
+
+    const sharedFolderIds = room.folders
+      .map((f) => {
+        const folderId = f.folderId && f.folderId._id 
+          ? f.folderId._id.toString() 
+          : f.folderId ? f.folderId.toString() : f.folderId;
+        return folderId;
+      })
+      .filter(Boolean);
+
+    if (sharedFolderIds.length > 0) {
+      const allFolderIds = await getAllFolderIds(sharedFolderIds);
+      const File = require("../models/fileModel");
+      
+      // Find file in any shared folder (including subfolders)
+      file = await File.findOne({
+        _id: fileId,
+        parentFolderId: { $in: allFolderIds },
+        isDeleted: false,
+      });
+
+      if (file) {
+        // Create a virtual fileEntry for folder-shared files
+        fileEntry = {
+          fileId: file,
+          sharedBy: null,
+          sharedAt: null,
+          isOneTimeShare: false,
+          accessedBy: [],
+        };
+      }
+    }
   }
 
-  const file = fileEntry.fileId;
-  if (!file) {
-    return next(new ApiError("File not found", 404));
+  if (!file || !fileEntry) {
+    return next(new ApiError("File not shared in this room", 404));
   }
 
   // Check if file exists on disk
@@ -2102,10 +2191,246 @@ exports.downloadRoomFile = asyncHandler(async (req, res, next) => {
   });
 });
 
-// @desc    View/Download room file (marks as accessed for one-time shares) - Legacy endpoint
+// @desc    View room file in browser (serve file for viewing)
 // @route   GET /api/rooms/:id/files/:fileId/view
 // @access  Private
-exports.viewRoomFile = exports.downloadRoomFile;
+exports.viewRoomFile = asyncHandler(async (req, res, next) => {
+  const { id: roomId, fileId } = req.params;
+  const userId = req.user._id;
+  const fs = require("fs");
+  const path = require("path");
+
+  // Find room with file populated
+  const room = await Room.findById(roomId).populate("files.fileId");
+  if (!room) {
+    return next(new ApiError("Room not found", 404));
+  }
+
+  // Check if user is a member
+  const isMember = room.members.some(
+    (m) => m.user.toString() === userId.toString()
+  );
+  if (!isMember) {
+    return next(new ApiError("You must be a room member to view files", 403));
+  }
+
+  // Find file entry - check both direct files and files in shared folders
+  let fileEntry = room.files.find(
+    (f) =>
+      f.fileId &&
+      (f.fileId._id ? f.fileId._id.toString() : f.fileId.toString()) === fileId
+  );
+
+  let file = fileEntry ? fileEntry.fileId : null;
+
+  // ✅ إذا لم يكن الملف مباشرة في room.files، ابحث عنه في المجلدات المشتركة
+  if (!file) {
+    // Populate folders if not already populated
+    if (room.folders && room.folders.length > 0 && !room.folders[0].folderId._id) {
+      await room.populate("folders.folderId");
+    }
+
+    // Get all shared folder IDs (including nested subfolders)
+    const getAllFolderIds = async (folderIds) => {
+      const allIds = [...folderIds];
+      const Folder = require("../models/folderModel");
+      
+      for (const folderId of folderIds) {
+        const subfolders = await Folder.find({
+          parentId: folderId,
+          isDeleted: false,
+        }).select("_id").lean();
+        
+        const subfolderIds = subfolders.map((sf) => sf._id.toString());
+        if (subfolderIds.length > 0) {
+          const nestedIds = await getAllFolderIds(subfolderIds);
+          allIds.push(...nestedIds);
+        }
+      }
+      
+      return [...new Set(allIds)]; // Remove duplicates
+    };
+
+    const sharedFolderIds = room.folders
+      .map((f) => {
+        const folderId = f.folderId && f.folderId._id 
+          ? f.folderId._id.toString() 
+          : f.folderId ? f.folderId.toString() : f.folderId;
+        return folderId;
+      })
+      .filter(Boolean);
+
+    if (sharedFolderIds.length > 0) {
+      const allFolderIds = await getAllFolderIds(sharedFolderIds);
+      const File = require("../models/fileModel");
+      
+      // Find file in any shared folder (including subfolders)
+      file = await File.findOne({
+        _id: fileId,
+        parentFolderId: { $in: allFolderIds },
+        isDeleted: false,
+      });
+
+      if (file) {
+        // Create a virtual fileEntry for folder-shared files
+        fileEntry = {
+          fileId: file,
+          sharedBy: null,
+          sharedAt: null,
+          isOneTimeShare: false,
+          accessedBy: [],
+        };
+      }
+    }
+  }
+
+  if (!file || !fileEntry) {
+    return next(new ApiError("File not shared in this room", 404));
+  }
+
+  // Check if file is deleted
+  if (file.isDeleted) {
+    return next(new ApiError("File not found (deleted)", 404));
+  }
+
+  // Check if file exists on disk
+  const filePath = file.path;
+  if (!fs.existsSync(filePath)) {
+    return next(new ApiError("File not found on server", 404));
+  }
+
+  // Check if user is file owner or the one who shared it
+  const fileUserId =
+    file.userId &&
+    (file.userId._id ? file.userId._id.toString() : file.userId.toString());
+  const sharedByUserId =
+    fileEntry.sharedBy &&
+    (fileEntry.sharedBy._id
+      ? fileEntry.sharedBy._id.toString()
+      : fileEntry.sharedBy.toString());
+
+  const isFileOwner = fileUserId === userId.toString();
+  const isSharedBy = sharedByUserId === userId.toString();
+
+  // If it's a one-time share, check if user already accessed it
+  // BUT: allow file owner and sharer to access unlimited times
+  // ✅ Skip one-time check for files in shared folders (they're always accessible)
+  if (fileEntry.isOneTimeShare && !isFileOwner && !isSharedBy && fileEntry.sharedBy !== null) {
+    const userAccessed =
+      fileEntry.accessedBy &&
+      fileEntry.accessedBy.some((a) => {
+        const accessUserId =
+          (a.user &&
+            (a.user._id ? a.user._id.toString() : a.user.toString())) ||
+          a.user;
+        return accessUserId === userId.toString();
+      });
+
+    if (userAccessed) {
+      return next(
+        new ApiError(
+          "You have already viewed this file. One-time access only.",
+          403
+        )
+      );
+    }
+
+    // Add user to accessedBy list (only for non-owners/non-sharers)
+    if (!fileEntry.accessedBy) {
+      fileEntry.accessedBy = [];
+    }
+    fileEntry.accessedBy.push({
+      user: userId,
+      accessedAt: new Date(),
+    });
+
+    // Check if all members have viewed the file
+    // Count only non-owner/non-sharer members
+    const membersToCount = room.members.filter((m) => {
+      const memberId =
+        (m.user && (m.user._id ? m.user._id.toString() : m.user.toString())) ||
+        m.user;
+      return memberId !== fileUserId && memberId !== sharedByUserId;
+    });
+
+    if (fileEntry.accessedBy.length >= membersToCount.length) {
+      fileEntry.allMembersViewed = true;
+      fileEntry.viewedByAllAt = new Date();
+
+      // Remove file from room when all members have viewed it
+      room.files = room.files.filter(
+        (f) =>
+          f.fileId &&
+          (f.fileId._id ? f.fileId._id.toString() : f.fileId.toString()) !==
+            fileId
+      );
+
+      // Log activity for file removal
+      await logActivity(
+        userId,
+        "file_removed_after_all_viewed",
+        "file",
+        file._id,
+        file.name,
+        {
+          roomId: room._id,
+          roomName: room.name,
+          reason: "All members viewed the one-time shared file",
+        }
+      );
+    }
+
+    await room.save();
+
+    // Log activity
+    await logActivity(
+      userId,
+      "file_viewed_onetime",
+      "file",
+      file._id,
+      file.name,
+      {
+        roomId: room._id,
+        roomName: room.name,
+        isOneTimeShare: true,
+      }
+    );
+  }
+
+  // Log activity for viewing
+  logActivity(
+    userId,
+    "file_viewed_from_room",
+    "file",
+    file._id,
+    file.name,
+    {
+      roomId: room._id,
+      roomName: room.name,
+      isOneTimeShare: fileEntry.isOneTimeShare || false,
+    },
+    {
+      ipAddress: req.ip,
+      userAgent: req.get("User-Agent"),
+    }
+  ).catch((error) => {
+    console.error("Error logging file view activity:", error);
+  });
+
+  // Set appropriate headers for viewing (inline, not download)
+  res.setHeader("Content-Type", file.type || "application/octet-stream");
+  res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
+
+  // Send file for viewing
+  res.sendFile(path.resolve(filePath), (err) => {
+    if (err) {
+      console.error("Error viewing file:", err);
+      if (!res.headersSent) {
+        return next(new ApiError("Error viewing file", 500));
+      }
+    }
+  });
+});
 
 const deleteFileIfAllViewed = async (room, fileEntry) => {
   if (fileEntry.allMembersViewed) {
@@ -2346,6 +2671,10 @@ exports.saveFileFromRoom = asyncHandler(async (req, res, next) => {
   const newFileName = `${timestamp}-${baseName}${ext}`;
   const newFilePath = path.join(uploadsDir, newFileName);
 
+  // ✅ التحقق من المساحة التخزينية قبل حفظ الملف
+  const { checkStorageLimit } = require("./fileService");
+  await checkStorageLimit(userId, originalFile.size);
+
   // Copy file from original location to new location
   const fileContent = fs.readFileSync(originalFilePath);
   fs.writeFileSync(newFilePath, fileContent);
@@ -2368,12 +2697,17 @@ exports.saveFileFromRoom = asyncHandler(async (req, res, next) => {
   // Update parent folder size if saving to a specific folder
   if (parentFolderId) {
     const Folder = require("../models/folderModel");
-    const updateFolderSize =
-      require("../services/folderService").updateFolderSize;
-    if (updateFolderSize) {
-      await updateFolderSize(parentFolderId);
+    const { updateFolderStats } = require("../services/folderService");
+    if (updateFolderStats) {
+      await updateFolderStats(parentFolderId, originalFile.size, 1);
     }
   }
+
+  // ✅ تحديث المساحة المستخدمة للمستخدم
+  const User = require("../models/userModel");
+  await User.findByIdAndUpdate(userId, {
+    $inc: { storageUsed: originalFile.size },
+  });
 
   // Log activity
   await logActivity(

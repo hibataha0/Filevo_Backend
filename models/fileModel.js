@@ -86,6 +86,8 @@ const fileSchema = new mongoose.Schema(
 
 // ✅ Indexes لتحسين الأداء
 fileSchema.index({ userId: 1, isDeleted: 1, createdAt: -1 });
+// ✅ Index محسّن للـ getFolderContents و countDocuments - DB-level pagination
+// هذا الـ index يخدم كلا الاستعلامين (مع وبدون createdAt)
 fileSchema.index({ parentFolderId: 1, isDeleted: 1, createdAt: -1 });
 fileSchema.index({ category: 1, isDeleted: 1 });
 

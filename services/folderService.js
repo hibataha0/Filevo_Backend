@@ -152,9 +152,6 @@ async function calculateFolderStatsRecursive(folderId) {
           : 0;
       totalSize += subSize;
       totalFiles += subFiles;
-      console.log(
-        `   🔍 Subfolder ${subfolder._id}: files=${subFiles}, size=${subSize}`
-      );
     }
 
     const result = {
@@ -171,6 +168,59 @@ async function calculateFolderStatsRecursive(folderId) {
       size: 0,
       filesCount: 0,
     };
+  }
+}
+
+// ✅ Helper function to update folder size and filesCount (increment/decrement)
+// هذه الدالة تحدث القيم المخزنة مباشرة بدون حساب recursive - أسرع بكثير
+async function updateFolderStats(folderId, sizeDelta, filesCountDelta) {
+  try {
+    if (!folderId) return;
+
+    // ✅ تحديث المجلد الحالي والحصول على parentId في query واحد
+    const folder = await Folder.findByIdAndUpdate(
+      folderId,
+      {
+        $inc: {
+          size: sizeDelta || 0,
+          filesCount: filesCountDelta || 0,
+        },
+      },
+      { select: "parentId", new: false } // ✅ جلب parentId فقط
+    ).lean();
+
+    // ✅ تحديث المجلدات الأب أيضاً (propagate up)
+    if (folder && folder.parentId) {
+      await updateFolderStats(folder.parentId, sizeDelta, filesCountDelta);
+    }
+  } catch (error) {
+    console.error(`❌ Error updating folder stats for ${folderId}:`, error);
+  }
+}
+
+// ✅ Helper function to recalculate and update folder stats (for initial setup or fixing)
+// هذه الدالة تحسب القيم بشكل recursive وتخزنها - تستخدم عند الحاجة لإصلاح البيانات
+async function recalculateAndUpdateFolderStats(folderId) {
+  try {
+    if (!folderId) return;
+
+    const stats = await calculateFolderStatsRecursive(folderId);
+
+    await Folder.findByIdAndUpdate(folderId, {
+      size: stats.size || 0,
+      filesCount: stats.filesCount || 0,
+    });
+
+    // ✅ تحديث المجلدات الأب أيضاً
+    const folder = await Folder.findById(folderId);
+    if (folder && folder.parentId) {
+      await recalculateAndUpdateFolderStats(folder.parentId);
+    }
+  } catch (error) {
+    console.error(
+      `❌ Error recalculating folder stats for ${folderId}:`,
+      error
+    );
   }
 }
 
@@ -522,20 +572,25 @@ exports.uploadFolder = asyncHandler(async (req, res, next) => {
       }
     }
 
-    // ✅ تحديث حجم المجلدات
-    for (const folder of createdFolders) {
-      const folderSize = await calculateFolderSizeRecursive(folder._id);
-      await Folder.findByIdAndUpdate(folder._id, { size: folderSize });
+    // ✅ تحديث حجم وعدد الملفات للمجلدات - استخدام الدوال الجديدة (أسرع بكثير)
+    for (const file of createdFiles) {
+      if (file.parentFolderId) {
+        await updateFolderStats(file.parentFolderId, file.size, 1);
+      }
     }
 
-    const rootFolderSize = await calculateFolderSizeRecursive(rootFolder._id);
+    // ✅ إعادة حساب القيم النهائية للتأكد من الدقة
+    await recalculateAndUpdateFolderStats(rootFolder._id);
+
+    // ✅ إعادة جلب المجلد مع القيم المحدثة
+    const updatedRootFolder = await Folder.findById(rootFolder._id);
 
     res.status(201).json({
       message: "Folder uploaded successfully",
-      folder: rootFolder,
+      folder: updatedRootFolder,
       filesCount: createdFiles.length,
       foldersCount: createdFolders.length,
-      totalSize: rootFolderSize,
+      totalSize: updatedRootFolder.size || 0,
     });
   } catch (error) {
     console.error("❌ Error uploading folder:", error);
@@ -550,71 +605,87 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
   const folderId = req.params.id;
   const userId = req.user._id;
 
-  // Find folder (owned by user OR shared with user)
+  // ✅ Find folder - استخدام select لتقليل البيانات المطلوبة
+  // ✅ بدون populate - سنجلب البيانات بشكل منفصل إذا احتجناها
   let folder = await Folder.findById(folderId)
-    .populate("userId", "name email")
-    .populate("sharedWith.user", "name email");
+    .select(
+      "name userId parentId path size filesCount description tags isShared sharedWith isStarred isProtected protectionType createdAt updatedAt"
+    )
+    .lean(); // ✅ استخدام lean() لتقليل overhead
 
   if (!folder) {
     return next(new ApiError("Folder not found", 404));
   }
 
   // Check if user has access
-  const isOwner = folder.userId._id.toString() === userId.toString();
-  const isSharedWith = folder.sharedWith.some((sw) => {
-    const userIdInShared = sw.user?._id?.toString() || sw.user?.toString();
-    return userIdInShared === userId.toString();
-  });
+  const userIdStr = userId.toString();
+  const folderUserId = folder.userId.toString();
+  const isOwner = folderUserId === userIdStr;
+
+  // ✅ تحسين sharedWith check - بدون populate
+  const isSharedWith =
+    folder.sharedWith &&
+    folder.sharedWith.some((sw) => {
+      const swUser = sw.user;
+      const sharedUserId =
+        swUser && swUser.toString
+          ? swUser.toString()
+          : (swUser || "").toString();
+      return sharedUserId === userIdStr;
+    });
 
   // Check if folder is shared in a room where user is a member
   let isSharedInRoom = false;
   let roomInfo = null;
   let sharedInRoomInfo = null;
 
+  // ✅ فقط إذا لم يكن المستخدم هو المالك أو مشترك معه مباشرة
   if (!isOwner && !isSharedWith) {
     const Room = require("../models/roomModel");
+    // ✅ تحسين query - استخدام select لتقليل البيانات المطلوبة + index محسّن
     const room = await Room.findOne({
       "folders.folderId": folderId,
       "members.user": userId,
       isActive: true,
     })
-      .populate("owner", "name email")
-      .populate("members.user", "name email");
+      .select(
+        "_id name description folders.$.folderId folders.$.sharedBy folders.$.sharedAt"
+      )
+      .lean(); // ✅ استخدام lean() لتقليل overhead - بدون populate
 
     isSharedInRoom = !!room;
 
     if (room) {
       // Get folder sharing info from room
-      const folderInRoom = room.folders.find(
-        (f) => f.folderId.toString() === folderId
-      );
+      const folderInRoom = Array.isArray(room.folders)
+        ? room.folders.find(
+            (f) => f && f.folderId && f.folderId.toString() === folderId
+          )
+        : null;
+
       roomInfo = {
         _id: room._id,
         name: room.name,
-        description: room.description,
+        description: room.description || "",
       };
 
-      if (folderInRoom) {
-        // Populate sharedBy if it exists
-        let sharedByUser = null;
-        if (folderInRoom.sharedBy) {
-          sharedByUser = await User.findById(folderInRoom.sharedBy).select(
-            "name email"
-          );
-        }
+      // ✅ جلب sharedBy user فقط إذا كان موجوداً
+      const sharedByUserId = folderInRoom && folderInRoom.sharedBy;
+      const sharedByUser = sharedByUserId
+        ? await User.findById(sharedByUserId).select("name email").lean()
+        : null;
 
-        sharedInRoomInfo = {
-          sharedAt: folderInRoom.sharedAt,
-          sharedBy: sharedByUser
-            ? {
-                _id: sharedByUser._id,
-                name: sharedByUser.name,
-                email: sharedByUser.email,
-              }
-            : null,
-          room: roomInfo,
-        };
-      }
+      sharedInRoomInfo = {
+        sharedAt: (folderInRoom && folderInRoom.sharedAt) || null,
+        sharedBy: sharedByUser
+          ? {
+              _id: sharedByUser._id,
+              name: sharedByUser.name,
+              email: sharedByUser.email,
+            }
+          : null,
+        room: roomInfo,
+      };
     }
 
     if (!isSharedInRoom) {
@@ -622,25 +693,64 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
     }
   }
 
-  const subfoldersCount = await Folder.countDocuments({
-    parentId: folderId,
-    isDeleted: false,
-  });
+  // ✅ استخدام القيم المخزنة مباشرة - أسرع بكثير!
+  const totalSize = Number(folder.size) || 0;
+  const totalFilesCount = Number(folder.filesCount) || 0;
 
-  // ✅ حساب الحجم وعدد الملفات بشكل recursive
-  const totalSize = await calculateFolderSizeRecursive(folderId);
-  const totalFilesCount = await calculateFolderFilesCountRecursive(folderId);
+  // ✅ جلب جميع البيانات المتوازية في مرة واحدة - أسرع بكثير!
+  // ✅ إذا كان المستخدم هو المالك، لا نحتاج جلب owner user (نعرفه من req.user)
+  const promises = [
+    Folder.countDocuments({
+      parentId: folderId,
+      isDeleted: false,
+    }),
+    File.countDocuments({
+      parentFolderId: folderId,
+      isDeleted: false,
+    }),
+    folder.parentId
+      ? Folder.findById(folder.parentId).select("_id name").lean()
+      : Promise.resolve(null),
+  ];
 
-  // ✅ عدد الملفات المباشرة (في المجلد نفسه فقط)
-  const directFilesCount = await File.countDocuments({
-    parentFolderId: folderId,
-    isDeleted: false,
-  });
-
-  let parentFolder = null;
-  if (folder.parentId) {
-    parentFolder = await Folder.findById(folder.parentId);
+  // ✅ جلب owner user فقط إذا لم يكن المستخدم هو المالك
+  if (!isOwner) {
+    promises.push(User.findById(folder.userId).select("name email").lean());
+  } else {
+    promises.push(Promise.resolve(null)); // ✅ placeholder
   }
+
+  // ✅ جلب sharedWith users فقط إذا كانوا موجودين وضروريين
+  if (folder.sharedWith && folder.sharedWith.length > 0) {
+    const sharedUserIds = folder.sharedWith
+      .map((sw) => {
+        const swUser = sw.user;
+        return swUser || (swUser && swUser._id) || null;
+      })
+      .filter(Boolean);
+
+    if (sharedUserIds.length > 0) {
+      promises.push(
+        User.find({
+          _id: { $in: sharedUserIds },
+        })
+          .select("name email")
+          .lean()
+      );
+    } else {
+      promises.push(Promise.resolve([]));
+    }
+  } else {
+    promises.push(Promise.resolve([]));
+  }
+
+  const [
+    subfoldersCount,
+    directFilesCount,
+    parentFolder,
+    ownerUser,
+    sharedUsers,
+  ] = await Promise.all(promises);
 
   const formatBytes = (bytes) => {
     if (bytes === 0) return "0 Bytes";
@@ -650,21 +760,60 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
+  // ✅ بناء sharedWith مع البيانات المحدثة
+  const sharedWithFormatted =
+    folder.sharedWith && folder.sharedWith.length > 0
+      ? folder.sharedWith.map((sw) => {
+          const swUser = sw.user;
+          const sharedUserId =
+            swUser && swUser.toString
+              ? swUser.toString()
+              : (swUser || "").toString();
+          const sharedUser = sharedUsers.find(
+            (u) => u._id.toString() === sharedUserId
+          );
+          const swUserId = swUser || (swUser && swUser._id) || sw.user;
+          return {
+            user: sharedUser
+              ? {
+                  _id: sharedUser._id,
+                  name: sharedUser.name,
+                  email: sharedUser.email,
+                }
+              : { _id: swUserId },
+            permission: sw.permission || "view",
+            sharedAt: sw.sharedAt || new Date(),
+          };
+        })
+      : [];
+
   // Build response object
   const folderResponse = {
     _id: folder._id,
     name: folder.name,
     type: "folder",
-    size: totalSize, // ✅ الحجم الكلي (recursive)
+    size: totalSize, // ✅ الحجم الكلي (مخزن)
     sizeFormatted: formatBytes(totalSize),
     path: folder.path,
     description: folder.description || "",
     tags: folder.tags || [],
-    owner: {
-      _id: folder.userId._id,
-      name: folder.userId.name,
-      email: folder.userId.email,
-    },
+    owner: (() => {
+      if (isOwner) {
+        return {
+          _id: req.user._id,
+          name: req.user.name,
+          email: req.user.email,
+        };
+      }
+      if (ownerUser) {
+        return {
+          _id: ownerUser._id,
+          name: ownerUser.name,
+          email: ownerUser.email,
+        };
+      }
+      return { _id: folder.userId };
+    })(),
     parentFolder: parentFolder
       ? {
           _id: parentFolder._id,
@@ -672,10 +821,10 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
         }
       : null,
     isShared: folder.isShared,
-    sharedWith: folder.sharedWith,
-    sharedWithCount: folder.sharedWith.length,
+    sharedWith: sharedWithFormatted,
+    sharedWithCount: sharedWithFormatted.length,
     subfoldersCount: subfoldersCount,
-    filesCount: totalFilesCount, // ✅ عدد الملفات الكلي (recursive)
+    filesCount: totalFilesCount, // ✅ عدد الملفات الكلي (مخزن)
     totalItems: subfoldersCount + directFilesCount, // ✅ العناصر المباشرة فقط
     isStarred: folder.isStarred,
     // 🔒 Folder Protection Info (without password hash)
@@ -714,107 +863,125 @@ exports.getFolderContents = asyncHandler(async (req, res, next) => {
   const limit = parseInt(req.query.limit) || 20;
   const skip = (page - 1) * limit;
 
-  const folder = await Folder.findOne({ _id: folderId, userId: userId });
+  // Find folder - check if user owns it, has direct access, or it's shared in a room
+  let folder = await Folder.findById(folderId)
+    .select("name size filesCount createdAt updatedAt userId sharedWith")
+    .lean();
+
   if (!folder) {
     return next(new ApiError("Folder not found", 404));
   }
 
-  // ✅ جلب جميع subfolders و files (بدون pagination أولاً)
-  const allSubfolders = await Folder.find({
-    parentId: folderId,
-    isDeleted: false,
-  }).sort({ createdAt: -1 });
+  // Check if user has access
+  const userIdStr = userId.toString();
+  const folderUserId = folder.userId.toString();
+  const isOwner = folderUserId === userIdStr;
 
-  const allFiles = await File.find({
-    parentFolderId: folderId,
-    isDeleted: false,
-  }).sort({ createdAt: -1 });
+  // Check if folder is directly shared with user
+  const isSharedWith =
+    folder.sharedWith &&
+    folder.sharedWith.some((sw) => {
+      const swUser = sw.user;
+      const sharedUserId =
+        swUser && swUser.toString
+          ? swUser.toString()
+          : (swUser || "").toString();
+      return sharedUserId === userIdStr;
+    });
 
-  const totalSubfolders = allSubfolders.length;
-  const totalFiles = allFiles.length;
+  // Check if folder is shared in a room where user is a member
+  let isSharedInRoom = false;
+  if (!isOwner && !isSharedWith) {
+    const Room = require("../models/roomModel");
+    const room = await Room.findOne({
+      "folders.folderId": folderId,
+      "members.user": userId,
+      isActive: true,
+    }).lean();
 
-  // ✅ دمج subfolders و files مع إضافة type
-  const allContents = [
-    ...allSubfolders.map((f) => ({ ...f.toObject(), type: "folder" })),
-    ...allFiles.map((f) => ({ ...f.toObject(), type: "file" })),
-  ];
+    isSharedInRoom = !!room;
+  }
 
-  // ✅ تطبيق pagination على المدمج
-  const totalItems = allContents.length;
+  // If user doesn't have access, return error
+  if (!isOwner && !isSharedWith && !isSharedInRoom) {
+    return next(new ApiError("Folder not found", 404));
+  }
+
+  // ✅ DB-level pagination محسّن - جلب limit مضاعف للتعويض عن الدمج
+  // ✅ هذا أسرع بكثير من جلب كل البيانات ثم pagination في JS
+  const fetchLimit = Math.max(limit * 2, 50); // ✅ جلب المزيد للتعويض عن الدمج والترتيب
+
+  // ✅ جلب جميع البيانات المتوازية - أسرع بكثير!
+  // ✅ ملاحظة: لا نضيف filter بـ userId لأن المجلد مشترك ويجب عرض جميع المحتويات بغض النظر عن المالك
+  const [subfolders, files, totalSubfolders, totalFiles] = await Promise.all([
+    Folder.find({
+      parentId: folderId,
+      isDeleted: false,
+    })
+      .select("name size filesCount createdAt updatedAt isStarred parentId")
+      .sort({ createdAt: -1 })
+      .limit(fetchLimit)
+      .lean(),
+    File.find({
+      parentFolderId: folderId,
+      isDeleted: false,
+    })
+      .select(
+        "name type size createdAt updatedAt isStarred parentFolderId category"
+      )
+      .sort({ createdAt: -1 })
+      .limit(fetchLimit)
+      .lean(),
+    Folder.countDocuments({
+      parentId: folderId,
+      isDeleted: false,
+    }),
+    File.countDocuments({
+      parentFolderId: folderId,
+      isDeleted: false,
+    }),
+  ]);
+
+  // ✅ استخدام القيم المخزنة مباشرة - أسرع بكثير!
+  const subfoldersWithDetails = subfolders.map((subfolder) => {
+    return {
+      ...subfolder,
+      type: "folder",
+      size: Number(subfolder.size) || 0,
+      filesCount: Number(subfolder.filesCount) || 0,
+    };
+  });
+
+  const filesWithDetails = files.map((file) => {
+    return {
+      ...file,
+      type: "file",
+    };
+  });
+
+  // ✅ دمج subfolders و files وترتيبهم حسب التاريخ
+  const allContents = [...subfoldersWithDetails, ...filesWithDetails].sort(
+    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+  );
+
+  // ✅ تطبيق pagination على المدمج (للحفاظ على نفس Response structure)
+  const totalItems = totalSubfolders + totalFiles;
   const paginatedContents = allContents.slice(skip, skip + limit);
 
   // ✅ فصل subfolders و files من النتائج المصفاة
-  const subfolders = paginatedContents.filter((item) => item.type === "folder");
-  const files = paginatedContents.filter((item) => item.type === "file");
-
-  // ✅ حساب الحجم وعدد الملفات للمجلدات الفرعية المعروضة
-  // ✅ استخدام Promise.allSettled بدلاً من Promise.all لمنع توقف عند فشل مجلد واحد
-  const subfoldersDetailsResults = await Promise.allSettled(
-    subfolders.map(async (subfolder) => {
-      try {
-        const subfolderObj = { ...subfolder };
-
-        // ✅ حساب الحجم وعدد الملفات بشكل recursive
-        const size = await calculateFolderSizeRecursive(subfolder._id);
-        const filesCount = await calculateFolderFilesCountRecursive(
-          subfolder._id
-        );
-
-        // ✅ تحديث القيم
-        subfolderObj.size = size;
-        subfolderObj.filesCount = filesCount;
-
-        return subfolderObj;
-      } catch (error) {
-        // ✅ في حالة فشل الحساب، نعيد المجلد بالقيم الافتراضية
-        console.error(
-          `⚠️ Error calculating stats for folder ${subfolder._id}:`,
-          error.message
-        );
-        return {
-          ...subfolder,
-          size: 0,
-          filesCount: 0,
-        };
-      }
-    })
+  const subfoldersPaginated = paginatedContents.filter(
+    (item) => item.type === "folder"
   );
-
-  // ✅ معالجة النتائج - نأخذ القيمة من fulfilled أو نستخدم القيم الافتراضية
-  const subfoldersWithDetails = subfoldersDetailsResults.map((result, index) => {
-    if (result.status === "fulfilled") {
-      return result.value;
-    } else {
-      // ✅ في حالة الفشل، نستخدم القيم الافتراضية
-      console.error(
-        `⚠️ Failed to get details for subfolder ${subfolders[index]._id}:`,
-        result.reason
-      );
-      return {
-        ...subfolders[index],
-        size: 0,
-        filesCount: 0,
-      };
-    }
-  });
-
-  // ✅ تحديث paginatedContents مع القيم المحسوبة
-  const updatedPaginatedContents = paginatedContents.map((item) => {
-    if (item.type === "folder") {
-      const updatedSubfolder = subfoldersWithDetails.find(
-        (s) => s._id.toString() === item._id.toString()
-      );
-      return updatedSubfolder || item;
-    }
-    return item;
-  });
+  const filesPaginated = paginatedContents.filter(
+    (item) => item.type === "file"
+  );
 
   res.status(200).json({
     message: "Folder contents retrieved successfully",
     folder: folder,
-    contents: updatedPaginatedContents,
-    subfolders: subfoldersWithDetails,
-    files: files,
+    contents: paginatedContents,
+    subfolders: subfoldersPaginated,
+    files: filesPaginated,
     totalItems: totalItems,
     pagination: {
       currentPage: page,
@@ -855,57 +1022,13 @@ exports.getAllFolders = asyncHandler(async (req, res, next) => {
 
   const totalFolders = await Folder.countDocuments(query);
 
-  // ✅ حساب الحجم وعدد الملفات لكل مجلد
-  // ✅ استخدام calculateFolderStatsRecursive لأنها أكثر كفاءة (تحسب كل شيء في مرة واحدة)
-  // ✅ استخدام Promise.allSettled لمنع توقف عند فشل حساب مجلد واحد
-  const foldersDetailsResults = await Promise.allSettled(
-    folders.map(async (folder) => {
-      try {
-        // ✅ تحويل إلى plain object أولاً
-        const folderObj = folder.toObject ? folder.toObject() : { ...folder };
-
-        // ✅ حساب الإحصائيات بشكل recursive (أكثر كفاءة - يحسب الحجم والعدد معاً)
-        const stats = await calculateFolderStatsRecursive(folder._id);
-        const size = stats && stats.size !== undefined ? stats.size : 0;
-        const filesCount =
-          stats && stats.filesCount !== undefined ? stats.filesCount : 0;
-
-        // ✅ تحديث القيم في المجلد - التأكد من أنها أرقام وليست null
-        folderObj.size = Number(size) || 0;
-        folderObj.filesCount = Number(filesCount) || 0;
-
-        return folderObj;
-      } catch (error) {
-        // ✅ في حالة فشل الحساب، نعيد المجلد بالقيم الافتراضية
-        console.error(
-          `⚠️ Error calculating stats for folder ${folder._id}:`,
-          error.message
-        );
-        const folderObj = folder.toObject ? folder.toObject() : { ...folder };
-        folderObj.size = 0;
-        folderObj.filesCount = 0;
-        return folderObj;
-      }
-    })
-  );
-
-  // ✅ معالجة النتائج - نأخذ القيمة من fulfilled أو نستخدم القيم الافتراضية
-  const foldersWithDetails = foldersDetailsResults.map((result, index) => {
-    if (result.status === "fulfilled") {
-      return result.value;
-    } else {
-      // ✅ في حالة الفشل، نستخدم القيم الافتراضية
-      console.error(
-        `⚠️ Failed to get details for folder ${folders[index]._id}:`,
-        result.reason
-      );
-      const folderObj = folders[index].toObject
-        ? folders[index].toObject()
-        : { ...folders[index] };
-      folderObj.size = 0;
-      folderObj.filesCount = 0;
-      return folderObj;
-    }
+  // ✅ استخدام القيم المخزنة مباشرة - أسرع بكثير!
+  const foldersWithDetails = folders.map((folder) => {
+    const folderObj = folder.toObject ? folder.toObject() : { ...folder };
+    // ✅ استخدام القيم المخزنة مباشرة (size و filesCount)
+    folderObj.size = Number(folder.size) || 0;
+    folderObj.filesCount = Number(folder.filesCount) || 0;
+    return folderObj;
   });
 
   // ✅ التحقق النهائي من القيم قبل الإرسال
@@ -968,21 +1091,14 @@ exports.getAllItems = asyncHandler(async (req, res, next) => {
   const totalFolders = await Folder.countDocuments(folderQuery);
   const totalFiles = await File.countDocuments(fileQuery);
 
-  // ✅ حساب الحجم وعدد الملفات لكل مجلد
-  const foldersWithDetails = await Promise.all(
-    folders.map(async (folder) => {
-      const folderObj = folder.toObject();
-
-      // ✅ حساب الحجم وعدد الملفات بشكل recursive
-      const size = await calculateFolderSizeRecursive(folder._id);
-      const filesCount = await calculateFolderFilesCountRecursive(folder._id);
-
-      folderObj.size = size;
-      folderObj.filesCount = filesCount;
-
-      return { ...folderObj, type: "folder" };
-    })
-  );
+  // ✅ استخدام القيم المخزنة مباشرة - أسرع بكثير!
+  const foldersWithDetails = folders.map((folder) => {
+    const folderObj = folder.toObject();
+    // ✅ استخدام القيم المخزنة مباشرة (size و filesCount)
+    folderObj.size = Number(folder.size) || 0;
+    folderObj.filesCount = Number(folder.filesCount) || 0;
+    return { ...folderObj, type: "folder" };
+  });
 
   const allItems = [
     ...foldersWithDetails,
@@ -1015,54 +1131,21 @@ exports.getRecentFolders = asyncHandler(async (req, res, next) => {
   const userId = req.user._id;
   const limit = parseInt(req.query.limit) || 10;
 
+  // ✅ جلب المجلدات مع القيم المخزنة مباشرة - بدون أي حساب recursive
   const folders = await Folder.find({ userId, isDeleted: false })
     .sort({ createdAt: -1 })
-    .limit(limit);
+    .limit(limit)
+    .select(
+      "name size filesCount createdAt updatedAt isStarred isShared parentId"
+    )
+    .lean(); // ✅ استخدام lean() لتقليل overhead
 
-  // ✅ حساب الحجم وعدد الملفات لكل مجلد
-  // ✅ استخدام Promise.allSettled لمنع توقف عند فشل حساب مجلد واحد
-  const foldersDetailsResults = await Promise.allSettled(
-    folders.map(async (folder) => {
-      try {
-        const folderObj = folder.toObject();
-
-        // ✅ حساب الحجم وعدد الملفات بشكل recursive
-        const size = await calculateFolderSizeRecursive(folder._id);
-        const filesCount = await calculateFolderFilesCountRecursive(folder._id);
-
-        folderObj.size = size;
-        folderObj.filesCount = filesCount;
-
-        return folderObj;
-      } catch (error) {
-        // ✅ في حالة فشل الحساب، نعيد المجلد بالقيم الافتراضية
-        console.error(
-          `⚠️ Error calculating stats for folder ${folder._id}:`,
-          error.message
-        );
-        const folderObj = folder.toObject();
-        folderObj.size = 0;
-        folderObj.filesCount = 0;
-        return folderObj;
-      }
-    })
-  );
-
-  // ✅ معالجة النتائج - نأخذ القيمة من fulfilled أو نستخدم القيم الافتراضية
-  const foldersWithDetails = foldersDetailsResults.map((result, index) => {
-    if (result.status === "fulfilled") {
-      return result.value;
-    } else {
-      // ✅ في حالة الفشل، نستخدم القيم الافتراضية
-      console.error(
-        `⚠️ Failed to get details for folder ${folders[index]._id}:`,
-        result.reason
-      );
-      const folderObj = folders[index].toObject();
-      folderObj.size = 0;
-      folderObj.filesCount = 0;
-      return folderObj;
-    }
+  // ✅ استخدام القيم المخزنة مباشرة - أسرع بكثير!
+  const foldersWithDetails = folders.map((folder) => {
+    // ✅ استخدام القيم المخزنة مباشرة (size و filesCount)
+    folder.size = Number(folder.size) || 0;
+    folder.filesCount = Number(folder.filesCount) || 0;
+    return folder;
   });
 
   res.status(200).json({
@@ -1127,6 +1210,11 @@ exports.deleteFolder = asyncHandler(async (req, res, next) => {
     { isDeleted: true, deletedAt: new Date() }
   );
 
+  // ✅ تحديث حجم وعدد الملفات للمجلد الأب - استخدام الدوال الجديدة (أسرع بكثير)
+  if (folder.parentId) {
+    await recalculateAndUpdateFolderStats(folder.parentId);
+  }
+
   res.status(200).json({
     message: "✅ Folder deleted successfully",
     folder: folder,
@@ -1148,6 +1236,11 @@ exports.restoreFolder = asyncHandler(async (req, res, next) => {
   folder.isDeleted = false;
   folder.deletedAt = null;
   await folder.save();
+
+  // ✅ تحديث حجم وعدد الملفات للمجلد الأب - استخدام الدوال الجديدة (أسرع بكثير)
+  if (folder.parentId) {
+    await recalculateAndUpdateFolderStats(folder.parentId);
+  }
 
   res.status(200).json({
     message: "✅ Folder restored successfully",
@@ -1207,21 +1300,14 @@ exports.getTrashFolders = asyncHandler(async (req, res, next) => {
 
   const totalFolders = await Folder.countDocuments({ userId, isDeleted: true });
 
-  // ✅ حساب الحجم وعدد الملفات لكل مجلد (حتى المحذوفة، إذا كانت البيانات موجودة)
-  const foldersWithDetails = await Promise.all(
-    folders.map(async (folder) => {
-      const folderObj = folder.toObject();
-
-      // ✅ حساب الحجم وعدد الملفات بشكل recursive (حتى لو كانت محذوفة)
-      const size = await calculateFolderSizeRecursive(folder._id);
-      const filesCount = await calculateFolderFilesCountRecursive(folder._id);
-
-      folderObj.size = size;
-      folderObj.filesCount = filesCount;
-
-      return folderObj;
-    })
-  );
+  // ✅ استخدام القيم المخزنة مباشرة - أسرع بكثير!
+  const foldersWithDetails = folders.map((folder) => {
+    const folderObj = folder.toObject();
+    // ✅ استخدام القيم المخزنة مباشرة (size و filesCount)
+    folderObj.size = Number(folder.size) || 0;
+    folderObj.filesCount = Number(folder.filesCount) || 0;
+    return folderObj;
+  });
 
   res.status(200).json({
     message: "Trash folders retrieved successfully",
@@ -1291,21 +1377,14 @@ exports.getStarredFolders = asyncHandler(async (req, res, next) => {
     isDeleted: false,
   });
 
-  // ✅ حساب الحجم وعدد الملفات لكل مجلد
-  const foldersWithDetails = await Promise.all(
-    folders.map(async (folder) => {
-      const folderObj = folder.toObject();
-
-      // ✅ حساب الحجم وعدد الملفات بشكل recursive
-      const size = await calculateFolderSizeRecursive(folder._id);
-      const filesCount = await calculateFolderFilesCountRecursive(folder._id);
-
-      folderObj.size = size;
-      folderObj.filesCount = filesCount;
-
-      return folderObj;
-    })
-  );
+  // ✅ استخدام القيم المخزنة مباشرة - أسرع بكثير!
+  const foldersWithDetails = folders.map((folder) => {
+    const folderObj = folder.toObject();
+    // ✅ استخدام القيم المخزنة مباشرة (size و filesCount)
+    folderObj.size = Number(folder.size) || 0;
+    folderObj.filesCount = Number(folder.filesCount) || 0;
+    return folderObj;
+  });
 
   res.status(200).json({
     message: "Starred folders retrieved successfully",
@@ -1435,19 +1514,17 @@ exports.moveFolder = asyncHandler(async (req, res, next) => {
     "name"
   );
 
-  // ✅ تحديث أحجام المجلدات
+  // ✅ تحديث أحجام وعدد الملفات للمجلدات - استخدام الدوال الجديدة (أسرع بكثير)
+  // ✅ إعادة حساب المجلد المنقول أولاً
+  await recalculateAndUpdateFolderStats(folderId);
+
+  // ✅ إعادة حساب المجلدات الأب
   if (oldParentFolderId) {
-    const oldParentSize = await calculateFolderSizeRecursive(oldParentFolderId);
-    await Folder.findByIdAndUpdate(oldParentFolderId, { size: oldParentSize });
+    await recalculateAndUpdateFolderStats(oldParentFolderId);
   }
   if (targetFolderId) {
-    const newParentSize = await calculateFolderSizeRecursive(targetFolderId);
-    await Folder.findByIdAndUpdate(targetFolderId, { size: newParentSize });
+    await recalculateAndUpdateFolderStats(targetFolderId);
   }
-
-  // ✅ تحديث حجم المجلد المنقول
-  const movedFolderSize = await calculateFolderSizeRecursive(folderId);
-  await Folder.findByIdAndUpdate(folderId, { size: movedFolderSize });
 
   // Log activity
   await logActivity(
@@ -1650,26 +1727,20 @@ exports.getFoldersSharedWithMe = asyncHandler(async (req, res, next) => {
     isDeleted: false,
   });
 
-  // ✅ حساب الحجم وعدد الملفات لكل مجلد مشترك
-  const formattedFolders = await Promise.all(
-    folders.map(async (folder) => {
-      const folderObj = folder.toObject();
-      const sharedEntry = folder.sharedWith.find(
-        (sw) => sw.user.toString() === userId.toString()
-      );
+  // ✅ استخدام القيم المخزنة مباشرة - أسرع بكثير!
+  const formattedFolders = folders.map((folder) => {
+    const folderObj = folder.toObject();
+    const sharedEntry = folder.sharedWith.find(
+      (sw) => sw.user.toString() === userId.toString()
+    );
 
-      // ✅ حساب الحجم وعدد الملفات بشكل recursive
-      const size = await calculateFolderSizeRecursive(folder._id);
-      const filesCount = await calculateFolderFilesCountRecursive(folder._id);
-
-      return {
-        ...folderObj,
-        size: size, // ✅ الحجم الكلي (recursive)
-        filesCount: filesCount, // ✅ عدد الملفات الكلي (recursive)
-        myPermission: sharedEntry ? sharedEntry.permission : null,
-      };
-    })
-  );
+    return {
+      ...folderObj,
+      size: Number(folder.size) || 0, // ✅ الحجم الكلي (مخزن)
+      filesCount: Number(folder.filesCount) || 0, // ✅ عدد الملفات الكلي (مخزن)
+      myPermission: sharedEntry ? sharedEntry.permission : null,
+    };
+  });
 
   res.status(200).json({
     message: "Folders shared with me retrieved successfully",
@@ -1741,19 +1812,21 @@ exports.getSharedFolderDetailsInRoom = asyncHandler(async (req, res, next) => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
-  // Get subfolders and files count
-  const subfoldersCount = await Folder.countDocuments({
-    parentId: folderId,
-    isDeleted: false,
-  });
+  // ✅ استخدام القيم المخزنة مباشرة - أسرع بكثير!
+  const totalSize = Number(folder.size) || 0;
+  const totalFilesCount = Number(folder.filesCount) || 0;
 
-  // ✅ حساب الحجم وعدد الملفات بشكل recursive
-  const totalSize = await calculateFolderSizeRecursive(folderId);
-  const totalFilesCount = await calculateFolderFilesCountRecursive(folderId);
-  const directFilesCount = await File.countDocuments({
-    parentFolderId: folderId,
-    isDeleted: false,
-  });
+  // ✅ جلب جميع البيانات المتوازية في مرة واحدة - أسرع بكثير!
+  const [subfoldersCount, directFilesCount] = await Promise.all([
+    Folder.countDocuments({
+      parentId: folderId,
+      isDeleted: false,
+    }),
+    File.countDocuments({
+      parentFolderId: folderId,
+      isDeleted: false,
+    }),
+  ]);
 
   res.status(200).json({
     message: "Shared folder details retrieved successfully",
@@ -2061,17 +2134,53 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
     return next();
   }
 
-  const folderId = req.params.id || (req.body && req.body.folderId) || req.query.folderId;
+  const folderId =
+    req.params.id || (req.body && req.body.folderId) || req.query.folderId;
   const userId = req.user._id;
 
   if (!folderId) {
     return next(); // No folder ID, skip check
   }
 
-  // Find folder
-  const folder = await Folder.findOne({ _id: folderId, userId: userId });
+  // Find folder - check if user owns it, has direct access, or it's shared in a room
+  let folder = await Folder.findById(folderId);
 
   if (!folder) {
+    return next(new ApiError("Folder not found", 404));
+  }
+
+  // Check if user has access
+  const userIdStr = userId.toString();
+  const folderUserId = folder.userId.toString();
+  const isOwner = folderUserId === userIdStr;
+
+  // Check if folder is directly shared with user
+  const isSharedWith =
+    folder.sharedWith &&
+    folder.sharedWith.some((sw) => {
+      const swUser = sw.user;
+      const sharedUserId =
+        swUser && swUser.toString
+          ? swUser.toString()
+          : (swUser || "").toString();
+      return sharedUserId === userIdStr;
+    });
+
+  // Check if folder is shared in a room where user is a member
+  let isSharedInRoom = false;
+  if (!isOwner && !isSharedWith) {
+    const Room = require("../models/roomModel");
+    const room = await Room.findOne({
+      "folders.folderId": folderId,
+      "members.user": userId,
+      isActive: true,
+    }).lean();
+
+    isSharedInRoom = !!room;
+  }
+
+  // If user doesn't have access, return error
+  if (!isOwner && !isSharedWith && !isSharedInRoom) {
     return next(new ApiError("Folder not found", 404));
   }
 
@@ -2102,9 +2211,11 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
 
   // ✅ إذا لم تكن هناك session صالحة، التحقق من كلمة المرور في header أو body
   // 🛡️ Safe access to req.body - check if it exists first
-  const password = req.headers["x-folder-password"] || (req.body && req.body.password);
+  const password =
+    req.headers["x-folder-password"] || (req.body && req.body.password);
   const biometricToken =
-    req.headers["x-folder-biometric-token"] || (req.body && req.body.biometricToken);
+    req.headers["x-folder-biometric-token"] ||
+    (req.body && req.body.biometricToken);
 
   if (password || biometricToken) {
     // ✅ التحقق من كلمة المرور
@@ -2157,3 +2268,7 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
     new ApiError("Folder is protected. Please verify access first", 403)
   );
 });
+
+// ✅ Export helper functions for use in other services (e.g., fileService.js)
+exports.updateFolderStats = updateFolderStats;
+exports.recalculateAndUpdateFolderStats = recalculateAndUpdateFolderStats;

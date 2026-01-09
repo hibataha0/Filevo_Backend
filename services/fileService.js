@@ -9,6 +9,83 @@ const fs = require("fs");
 const path = require("path");
 const archiver = require("archiver");
 const ApiError = require("../utils/apiError");
+// ✅ استيراد الدوال الجديدة لتحديث حجم وعدد الملفات
+const {
+  updateFolderStats,
+  recalculateAndUpdateFolderStats,
+} = require("./folderService");
+
+// ✅ Helper function to calculate user's used storage
+async function calculateUserStorageUsed(userId) {
+  try {
+    const result = await File.aggregate([
+      {
+        $match: {
+          userId: userId,
+          isDeleted: false,
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalSize: { $sum: "$size" },
+        },
+      },
+    ]);
+
+    const totalSize = result.length > 0 ? result[0].totalSize : 0;
+    return totalSize;
+  } catch (error) {
+    console.error("Error calculating user storage used:", error);
+    return 0;
+  }
+}
+
+// ✅ Helper function to update user storage used
+async function updateUserStorageUsed(userId) {
+  try {
+    const storageUsed = await calculateUserStorageUsed(userId);
+    await User.findByIdAndUpdate(userId, { storageUsed });
+    return storageUsed;
+  } catch (error) {
+    console.error("Error updating user storage used:", error);
+    return 0;
+  }
+}
+
+// ✅ Helper function to check if user has enough storage
+async function checkStorageLimit(userId, fileSize) {
+  const user = await User.findById(userId).select("storageLimit storageUsed");
+  if (!user) {
+    throw new ApiError("User not found", 404);
+  }
+
+  const currentUsed = user.storageUsed || 0;
+  const limit = user.storageLimit || 10 * 1024 * 1024 * 1024; // Default 10 GB
+  const available = limit - currentUsed;
+
+  if (fileSize > available) {
+    const formatBytes = (bytes) => {
+      if (bytes === 0) return "0 Bytes";
+      const k = 1024;
+      const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    };
+
+    throw new ApiError(
+      `Storage limit exceeded. Available: ${formatBytes(available)}, Required: ${formatBytes(fileSize)}. Please delete files or upgrade your storage.`,
+      403
+    );
+  }
+
+  return true;
+}
+
+// ✅ Export helper functions for use in other services
+exports.checkStorageLimit = checkStorageLimit;
+exports.calculateUserStorageUsed = calculateUserStorageUsed;
+exports.updateUserStorageUsed = updateUserStorageUsed;
 
 // Helper function to generate unique file name
 async function generateUniqueFileName(originalName, parentFolderId, userId) {
@@ -71,6 +148,10 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
   }
 
   try {
+    // ✅ التحقق من المساحة التخزينية قبل رفع الملفات
+    const totalSize = files.reduce((sum, file) => sum + (file.size || 0), 0);
+    await checkStorageLimit(userId, totalSize);
+
     const uploadedFiles = [];
     const errors = [];
 
@@ -145,10 +226,27 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
       }
     }
 
-    // Update parent folder size if uploading to a specific folder
+    // ✅ تحديث حجم وعدد الملفات للمجلد الأب - استخدام الدوال الجديدة (أسرع بكثير)
     if (parentFolderId) {
-      await updateFolderSize(parentFolderId);
+      const folderTotalSize = uploadedFiles.reduce(
+        (sum, file) => sum + file.size,
+        0
+      );
+      await updateFolderStats(
+        parentFolderId,
+        folderTotalSize,
+        uploadedFiles.length
+      );
     }
+
+    // ✅ تحديث المساحة المستخدمة للمستخدم
+    const uploadedTotalSize = uploadedFiles.reduce(
+      (sum, file) => sum + file.size,
+      0
+    );
+    await User.findByIdAndUpdate(userId, {
+      $inc: { storageUsed: uploadedTotalSize },
+    });
 
     res.status(200).json({
       message: ` ${uploadedFiles.length} files uploaded successfully`,
@@ -195,6 +293,9 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
 
     parentFolderId = parentFolder._id;
   }
+
+  // ✅ التحقق من المساحة التخزينية قبل رفع الملف
+  await checkStorageLimit(userId, file.size);
 
   try {
     const category = getCategoryByExtension(file.originalname, file.mimetype); // Determine file category
@@ -253,10 +354,15 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
       }
     );
 
-    // Update parent folder size if uploading to a specific folder
+    // ✅ تحديث حجم وعدد الملفات للمجلد الأب - استخدام الدوال الجديدة (أسرع بكثير)
     if (parentFolderId) {
-      await updateFolderSize(parentFolderId);
+      await updateFolderStats(parentFolderId, newFile.size, 1);
     }
+
+    // ✅ تحديث المساحة المستخدمة للمستخدم
+    await User.findByIdAndUpdate(userId, {
+      $inc: { storageUsed: newFile.size },
+    });
 
     res.status(201).json({
       message: "✅ File uploaded successfully",
@@ -481,14 +587,12 @@ exports.getRecentFiles = asyncHandler(async (req, res) => {
   const userId = req.user._id;
   const limit = parseInt(req.query.limit) || 10;
 
-  // ✅ استخدام lean + اختيار الحقول المهمة فقط
+  // ✅ استخدام lean + اختيار الحقول المهمة فقط - بدون populate لتحسين الأداء
   const files = await File.find({ userId, isDeleted: false })
-    .sort({ uploadedAt: -1 })
+    .sort({ createdAt: -1 }) // ✅ استخدام createdAt بدلاً من uploadedAt (أسرع)
     .limit(limit)
-    .select("name type size parentFolderId userId uploadedAt") // ✅ يقلل حجم البيانات
-    .populate("parentFolderId", "name")
-    .populate("userId", "name email")
-    .lean();
+    .select("name type size parentFolderId createdAt") // ✅ إزالة userId لأنه المستخدم الحالي
+    .lean(); // ✅ بدون populate - أسرع بكثير
 
   res.status(200).json({
     message: "Recent files retrieved successfully",
@@ -579,8 +683,39 @@ exports.deleteFile = asyncHandler(async (req, res) => {
   file.deleteExpiryDate = expiryDate;
   await file.save();
 
-  // Log activity
-  await logActivity(
+  // ✅ تحديث المساحة المستخدمة للمستخدم (تقليل المساحة المستخدمة عند الحذف)
+  // ملاحظة: عند الحذف (move to trash) لا نغير المساحة لأن الملف ما زال موجوداً
+  // المساحة ستتغير فقط عند الحذف الدائم (deleteFilePermanent)
+
+  // ✅ تحديث حجم وعدد الملفات للمجلد الأب - استخدام الدوال الجديدة (أسرع بكثير)
+  // ✅ جعل العملية غير متزامنة مع timeout لمنع التعليق
+  if (file.parentFolderId) {
+    // ✅ تشغيل updateFolderStats في الخلفية مع timeout
+    const updatePromise = updateFolderStats(
+      file.parentFolderId,
+      -(file.size || 0),
+      -1
+    ).catch((error) => {
+      console.error("Error updating folder stats after file delete:", error);
+    });
+
+    // ✅ إضافة timeout لمنع التعليق (5 ثواني)
+    Promise.race([
+      updatePromise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout")), 5000)
+      ),
+    ]).catch((timeoutError) => {
+      if (timeoutError.message === "Timeout") {
+        console.warn(
+          "Folder stats update timed out after file delete - continuing anyway"
+        );
+      }
+    });
+  }
+
+  // ✅ Log activity في الخلفية (لا يمنع الرد)
+  logActivity(
     userId,
     "file_deleted",
     "file",
@@ -596,8 +731,11 @@ exports.deleteFile = asyncHandler(async (req, res) => {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
     }
-  );
+  ).catch((logError) => {
+    console.error("Error logging file delete activity:", logError);
+  });
 
+  // ✅ إرسال الرد فوراً بعد حفظ الملف
   res.status(200).json({
     message: "✅ File moved to trash successfully",
     file: file,
@@ -630,8 +768,35 @@ exports.restoreFile = asyncHandler(async (req, res) => {
   file.deleteExpiryDate = null;
   await file.save();
 
-  // Log activity
-  await logActivity(
+  // ✅ تحديث حجم وعدد الملفات للمجلد الأب - استخدام الدوال الجديدة (أسرع بكثير)
+  // ✅ جعل العملية غير متزامنة مع timeout لمنع التعليق
+  if (file.parentFolderId) {
+    // ✅ تشغيل updateFolderStats في الخلفية مع timeout
+    const updatePromise = updateFolderStats(
+      file.parentFolderId,
+      file.size || 0,
+      1
+    ).catch((error) => {
+      console.error("Error updating folder stats after file restore:", error);
+    });
+
+    // ✅ إضافة timeout لمنع التعليق (5 ثواني)
+    Promise.race([
+      updatePromise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout")), 5000)
+      ),
+    ]).catch((timeoutError) => {
+      if (timeoutError.message === "Timeout") {
+        console.warn(
+          "Folder stats update timed out after file restore - continuing anyway"
+        );
+      }
+    });
+  }
+
+  // ✅ Log activity في الخلفية (لا يمنع الرد)
+  logActivity(
     userId,
     "file_restored",
     "file",
@@ -646,8 +811,11 @@ exports.restoreFile = asyncHandler(async (req, res) => {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
     }
-  );
+  ).catch((logError) => {
+    console.error("Error logging file restore activity:", logError);
+  });
 
+  // ✅ إرسال الرد فوراً بعد حفظ الملف
   res.status(200).json({
     message: "✅ File restored successfully",
     file: file,
@@ -676,8 +844,15 @@ exports.deleteFilePermanent = asyncHandler(async (req, res) => {
     fs.unlinkSync(filePath);
   }
 
+  const fileSize = file.size || 0;
+
   // Delete from database
   await File.findByIdAndDelete(fileId);
+
+  // ✅ تحديث المساحة المستخدمة للمستخدم (تقليل المساحة عند الحذف الدائم)
+  await User.findByIdAndUpdate(userId, {
+    $inc: { storageUsed: -fileSize },
+  });
 
   // Log activity
   await logActivity(
@@ -913,14 +1088,15 @@ exports.updateFile = asyncHandler(async (req, res) => {
     }
 
     const oldParentFolderId = file.parentFolderId;
+    const fileSize = file.size || 0;
     file.parentFolderId = parentFolderId || null;
 
-    // Update folder sizes
+    // ✅ تحديث حجم وعدد الملفات للمجلدات - استخدام الدوال الجديدة (أسرع بكثير)
     if (oldParentFolderId) {
-      await updateFolderSize(oldParentFolderId);
+      await updateFolderStats(oldParentFolderId, -fileSize, -1);
     }
     if (file.parentFolderId) {
-      await updateFolderSize(file.parentFolderId);
+      await updateFolderStats(file.parentFolderId, fileSize, 1);
     }
   }
 
@@ -989,9 +1165,18 @@ exports.updateFileContent = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "File not found" });
   }
 
+  // ✅ التحقق من المساحة التخزينية (الفرق بين الحجم القديم والجديد)
+  const oldSize = existingFile.size || 0;
+  const newSize = newFile.size || 0;
+  const sizeDifference = newSize - oldSize;
+
+  if (sizeDifference > 0) {
+    // إذا كان الملف الجديد أكبر، تحقق من المساحة المتاحة
+    await checkStorageLimit(userId, sizeDifference);
+  }
+
   try {
     const oldFilePath = existingFile.path;
-    const oldSize = existingFile.size;
     const oldType = existingFile.type;
     const oldParentFolderId = existingFile.parentFolderId;
 
@@ -1023,9 +1208,17 @@ exports.updateFileContent = asyncHandler(async (req, res) => {
 
     await existingFile.save();
 
-    // Update parent folder size if file is in a folder
+    // ✅ تحديث حجم المجلد الأب - استخدام الدوال الجديدة (أسرع بكثير)
     if (oldParentFolderId) {
-      await updateFolderSize(oldParentFolderId);
+      const sizeDelta = newFile.size - (existingFile.size || 0);
+      await updateFolderStats(oldParentFolderId, sizeDelta, 0);
+    }
+
+    // ✅ تحديث المساحة المستخدمة للمستخدم (الفرق بين الحجم القديم والجديد)
+    if (sizeDifference !== 0) {
+      await User.findByIdAndUpdate(userId, {
+        $inc: { storageUsed: sizeDifference },
+      });
     }
 
     // Trigger background processing for the new file content
@@ -1100,37 +1293,26 @@ exports.moveFile = asyncHandler(async (req, res) => {
     targetFolderId = null;
   }
 
-  // Find file
-  const file = await File.findOne({ _id: fileId, userId: userId });
+  // ✅ جلب الملف مع التحقق من targetFolder بشكل متوازي - أسرع بكثير!
+  const [file, targetFolder] = await Promise.all([
+    File.findOne({ _id: fileId, userId: userId }).lean(),
+    targetFolderId
+      ? Folder.findOne({
+          _id: targetFolderId,
+          userId: userId,
+        })
+          .select("_id name")
+          .lean()
+      : Promise.resolve(null),
+  ]);
 
   if (!file) {
     return res.status(404).json({ message: "File not found" });
   }
 
-  // If targetFolderId is provided, verify it exists and belongs to user
-  if (targetFolderId) {
-    const targetFolder = await Folder.findOne({
-      _id: targetFolderId,
-      userId: userId,
-    });
-    if (!targetFolder) {
-      return res.status(404).json({ message: "Target folder not found" });
-    }
-
-    // Check if file is already in this folder
-    if (
-      file.parentFolderId &&
-      file.parentFolderId.toString() === targetFolderId.toString()
-    ) {
-      return res
-        .status(400)
-        .json({ message: "File is already in this folder" });
-    }
-  } else {
-    // Moving to root - check if already in root
-    if (!file.parentFolderId || file.parentFolderId === null) {
-      return res.status(400).json({ message: "File is already in root" });
-    }
+  // If targetFolderId is provided, verify it exists
+  if (targetFolderId && !targetFolder) {
+    return res.status(404).json({ message: "Target folder not found" });
   }
 
   // Store old parent folder ID
@@ -1138,55 +1320,78 @@ exports.moveFile = asyncHandler(async (req, res) => {
     ? file.parentFolderId.toString()
     : null;
 
-  // ✅ استخدام findByIdAndUpdate للتأكد من تحديث القيمة بشكل صحيح
-  const updateData = { parentFolderId: targetFolderId };
+  // Check if file is already in target folder
+  if (targetFolderId) {
+    if (oldParentFolderId === targetFolderId.toString()) {
+      return res
+        .status(400)
+        .json({ message: "File is already in this folder" });
+    }
+  } else {
+    // Moving to root - check if already in root
+    if (!oldParentFolderId) {
+      return res.status(400).json({ message: "File is already in root" });
+    }
+  }
+
+  // ✅ تحديث الملف مباشرة - بدون إعادة جلب
+  const fileSize = file.size || 0;
   const updatedFile = await File.findByIdAndUpdate(
     fileId,
-    { $set: updateData },
+    { $set: { parentFolderId: targetFolderId } },
     { new: true, runValidators: true }
-  );
+  ).lean();
 
   if (!updatedFile) {
     return res.status(404).json({ message: "File not found after update" });
   }
 
-  // ✅ إعادة جلب الملف للتأكد من أن البيانات محدثة
-  const refreshedFile = await File.findById(fileId).populate(
-    "parentFolderId",
-    "name"
-  );
-
-  // Update folder sizes
+  // ✅ تحديث حجم وعدد الملفات للمجلدات بشكل متوازي - أسرع بكثير!
+  const updatePromises = [];
   if (oldParentFolderId) {
-    await updateFolderSize(oldParentFolderId);
+    updatePromises.push(updateFolderStats(oldParentFolderId, -fileSize, -1));
   }
   if (targetFolderId) {
-    await updateFolderSize(targetFolderId);
+    updatePromises.push(updateFolderStats(targetFolderId, fileSize, 1));
   }
 
-  // Log activity
-  await logActivity(
+  // ✅ تنفيذ تحديثات المجلدات بشكل متوازي
+  await Promise.all(updatePromises);
+
+  // ✅ بناء response object مع parentFolder info
+  const responseFile = {
+    ...updatedFile,
+    parentFolderId: targetFolderId
+      ? {
+          _id: targetFolder._id,
+          name: targetFolder.name,
+        }
+      : null,
+  };
+
+  // ✅ Log activity بشكل متوازي مع response (أو يمكن إزالته إذا كان بطيئاً)
+  logActivity(
     userId,
     "file_moved",
     "file",
-    refreshedFile._id,
-    refreshedFile.name,
+    updatedFile._id,
+    updatedFile.name,
     {
       fromFolder: oldParentFolderId || "root",
       toFolder: targetFolderId || "root",
-      originalSize: refreshedFile.size,
-      type: refreshedFile.type,
-      category: refreshedFile.category,
+      originalSize: fileSize,
+      type: updatedFile.type,
+      category: updatedFile.category,
     },
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
     }
-  );
+  ).catch((err) => console.error("Error logging activity:", err)); // ✅ لا ننتظر logActivity
 
   res.status(200).json({
     message: "✅ File moved successfully",
-    file: refreshedFile,
+    file: responseFile,
     fromFolder: oldParentFolderId || null,
     toFolder: targetFolderId || null,
   });
@@ -1205,11 +1410,10 @@ exports.updateAllFolderSizes = asyncHandler(async (req, res) => {
     let updatedCount = 0;
     const errors = [];
 
-    // Update each folder size
+    // ✅ تحديث حجم وعدد الملفات لكل مجلد - استخدام الدوال الجديدة
     for (const folder of folders) {
       try {
-        const newSize = await calculateFolderSizeRecursive(folder._id);
-        await Folder.findByIdAndUpdate(folder._id, { size: newSize });
+        await recalculateAndUpdateFolderStats(folder._id);
         updatedCount++;
       } catch (error) {
         errors.push({
@@ -1962,14 +2166,47 @@ exports.viewFile = asyncHandler(async (req, res, next) => {
   const userId = req.user._id;
 
   // Find file
-  const file = await File.findById(fileId);
+  const file = await File.findById(fileId)
+    .populate("userId", "name email")
+    .populate("sharedWith.user", "name email");
   if (!file) {
     return next(new ApiError("File not found", 404));
   }
 
   // Check if user owns the file
-  if (file.userId.toString() !== userId.toString()) {
-    return next(new ApiError("Access denied. You don't own this file", 403));
+  const fileUserId = file.userId._id
+    ? file.userId._id.toString()
+    : file.userId.toString();
+  const isOwner = fileUserId === userId.toString();
+
+  // Check if file is directly shared with user
+  const isSharedWith =
+    file.sharedWith &&
+    file.sharedWith.some((sw) => {
+      const swUserId = sw.user._id
+        ? sw.user._id.toString()
+        : sw.user.toString();
+      return swUserId === userId.toString();
+    });
+
+  // Check if file is shared in a room where user is a member
+  let isSharedInRoom = false;
+  if (!isOwner && !isSharedWith) {
+    const Room = require("../models/roomModel");
+    const room = await Room.findOne({
+      "files.fileId": fileId,
+      "members.user": userId,
+      isActive: true,
+    }).lean();
+
+    isSharedInRoom = !!room;
+  }
+
+  // If user doesn't have access, return error
+  if (!isOwner && !isSharedWith && !isSharedInRoom) {
+    return next(
+      new ApiError("Access denied. You don't have access to this file", 403)
+    );
   }
 
   // Check if file is deleted
@@ -1983,20 +2220,6 @@ exports.viewFile = asyncHandler(async (req, res, next) => {
     return next(new ApiError("File not found on server", 404));
   }
 
-  // Log activity
-  await logActivity(
-    userId,
-    "file_viewed",
-    "file",
-    file._id,
-    file.name,
-    {},
-    {
-      ipAddress: req.ip,
-      userAgent: req.get("User-Agent"),
-    }
-  );
-
   // Set appropriate headers for viewing
   res.setHeader("Content-Type", file.type || "application/octet-stream");
   res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
@@ -2009,6 +2232,22 @@ exports.viewFile = asyncHandler(async (req, res, next) => {
         return next(new ApiError("Error viewing file", 500));
       }
     }
+  });
+
+  // ✅ Log activity in background (after sending file) - doesn't block response
+  logActivity(
+    userId,
+    "file_viewed",
+    "file",
+    file._id,
+    file.name,
+    {},
+    {
+      ipAddress: req.ip,
+      userAgent: req.get("User-Agent"),
+    }
+  ).catch((error) => {
+    console.error("Error logging file view activity:", error);
   });
 });
 
@@ -2063,6 +2302,57 @@ exports.downloadFile = asyncHandler(async (req, res, next) => {
         return next(new ApiError("Error downloading file", 500));
       }
     }
+  });
+});
+
+// @desc    Get user storage information
+// @route   GET /api/files/storage
+// @access  Private
+exports.getStorageInfo = asyncHandler(async (req, res) => {
+  const userId = req.user._id;
+
+  const user = await User.findById(userId).select("storageLimit storageUsed");
+  if (!user) {
+    return res.status(404).json({ message: "User not found" });
+  }
+
+  // Calculate actual used storage from files
+  const actualStorageUsed = await calculateUserStorageUsed(userId);
+
+  // Update user storage if there's a discrepancy
+  if (Math.abs(actualStorageUsed - (user.storageUsed || 0)) > 1024) {
+    // If difference is more than 1KB, update it
+    await User.findByIdAndUpdate(userId, { storageUsed: actualStorageUsed });
+    user.storageUsed = actualStorageUsed;
+  }
+
+  const storageLimit = user.storageLimit || 10 * 1024 * 1024 * 1024; // Default 10 GB
+  const storageUsed = user.storageUsed || 0;
+  const storageAvailable = storageLimit - storageUsed;
+  const storagePercentage = (storageUsed / storageLimit) * 100;
+
+  // Format bytes to readable format
+  const formatBytes = (bytes) => {
+    if (bytes === 0) return "0 Bytes";
+    const k = 1024;
+    const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  };
+
+  res.status(200).json({
+    message: "Storage information retrieved successfully",
+    storage: {
+      limit: storageLimit,
+      limitFormatted: formatBytes(storageLimit),
+      used: storageUsed,
+      usedFormatted: formatBytes(storageUsed),
+      available: storageAvailable,
+      availableFormatted: formatBytes(storageAvailable),
+      percentage: parseFloat(storagePercentage.toFixed(2)),
+      isFull: storageAvailable <= 0,
+      canUpload: storageAvailable > 0,
+    },
   });
 });
 

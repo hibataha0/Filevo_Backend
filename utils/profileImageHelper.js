@@ -6,7 +6,7 @@
  */
 function buildProfileImageUrl(profileImg, req = null) {
   // If profileImg is null, undefined, or empty, return null
-  if (!profileImg || profileImg.trim() === "") {
+  if (!profileImg || (typeof profileImg !== "string") || profileImg.trim() === "") {
     return null;
   }
 
@@ -18,31 +18,38 @@ function buildProfileImageUrl(profileImg, req = null) {
   // Build base URL
   let baseUrl;
   
-  if (req) {
-    // Use request to build full URL
-    const protocol = req.protocol || "http";
-    const host = req.get("host") || "localhost:8000";
-    baseUrl = `${protocol}://${host}`;
-  } else {
-    // Fallback to environment variable or default
-    baseUrl = process.env.BASE_URL || process.env.FRONTEND_URL?.replace(":3000", ":8000") || "http://localhost:8000";
-  }
+  try {
+    if (req) {
+      // Use request to build full URL
+      const protocol = req.protocol || "http";
+      const host = req.get("host") || "localhost:8000";
+      baseUrl = `${protocol}://${host}`;
+    } else {
+      // Fallback to environment variable or default
+      const frontendUrl = process.env.FRONTEND_URL || "";
+      const replacedUrl = frontendUrl ? frontendUrl.replace(":3000", ":8000") : "";
+      baseUrl = process.env.BASE_URL || replacedUrl || "http://localhost:8000";
+    }
 
-  // Profile images are stored in uploads/users/ directory
-  // But the filename in DB doesn't include the directory path
-  // So we need to check if it's already a path or just a filename
-  let imagePath;
-  
-  if (profileImg.includes("/")) {
-    // Already includes path
-    imagePath = profileImg;
-  } else {
-    // Just filename, add users/ directory
-    imagePath = `users/${profileImg}`;
-  }
+    // Profile images are stored in uploads/users/ directory
+    // But the filename in DB doesn't include the directory path
+    // So we need to check if it's already a path or just a filename
+    let imagePath;
+    
+    if (profileImg.includes("/")) {
+      // Already includes path
+      imagePath = profileImg;
+    } else {
+      // Just filename, add users/ directory
+      imagePath = `users/${profileImg}`;
+    }
 
-  // Return full URL
-  return `${baseUrl}/uploads/${imagePath}`;
+    // Return full URL
+    return `${baseUrl}/uploads/${imagePath}`;
+  } catch (error) {
+    console.error("Error building profile image URL:", error);
+    return null;
+  }
 }
 
 /**
@@ -56,17 +63,23 @@ function transformUserProfileImage(user, req = null) {
     return user;
   }
 
-  // Convert Mongoose document to plain object if needed
-  const userObj = user.toObject ? user.toObject() : user;
+  try {
+    // Convert Mongoose document to plain object if needed
+    const userObj = user.toObject ? user.toObject() : user;
 
-  // Build full URL
-  const profileImgUrl = buildProfileImageUrl(userObj.profileImg, req);
+    // Build full URL
+    const profileImgUrl = buildProfileImageUrl(userObj.profileImg, req);
 
-  // Add profileImgUrl field (keep original profileImg for backward compatibility)
-  return {
-    ...userObj,
-    profileImgUrl: profileImgUrl,
-  };
+    // Add profileImgUrl field (keep original profileImg for backward compatibility)
+    return {
+      ...userObj,
+      profileImgUrl: profileImgUrl,
+    };
+  } catch (error) {
+    console.error("Error transforming user profile image:", error);
+    // Return user as-is if transformation fails
+    return user.toObject ? user.toObject() : user;
+  }
 }
 
 /**
@@ -88,6 +101,9 @@ module.exports = {
   transformUserProfileImage,
   transformUsersProfileImages,
 };
+
+
+
 
 
 

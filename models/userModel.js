@@ -49,6 +49,15 @@ const userSchema = new mongoose.Schema(
       default: false,
     },
     profileImg: String, // صورة الملف الشخصي
+    // ✅ المساحة التخزينية
+    storageLimit: {
+      type: Number,
+      default: 10 * 1024 * 1024 * 1024, // 10 GB بالبايت (10 * 1024 * 1024 * 1024)
+    },
+    storageUsed: {
+      type: Number,
+      default: 0, // المساحة المستخدمة بالبايت
+    },
   },
   { timestamps: true }
 );
