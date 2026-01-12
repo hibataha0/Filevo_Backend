@@ -1,5 +1,5 @@
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 
 // 1 - Create schema
 const userSchema = new mongoose.Schema(
@@ -21,40 +21,21 @@ const userSchema = new mongoose.Schema(
     },
     password: {
       type: String,
-      required: function() {
-        return this.authProvider === 'local';
-      },
+      required: [true, "Password is required"],
       minlength: [6, "Too short password"],
-    },
-    googleId: {
-      type: String,
-      unique: true,
-      sparse: true, // يسمح بقيم null متعددة
-    },
-    authProvider: {
-      type: String,
-      enum: ["local", "google"],
-      default: "local"
     },
     passwordChangedAt: Date, // 🔹 لإدارة التحقق من التوكن لاحقًا
     passwordResetCode: String,
     passwordResetExpires: Date,
     passwordResetVerified: Boolean,
     lastPasswordResetEmail: String, // 🔹 نخزن فيه الإيميل مؤقتًا
-    // ✅ حقول التحقق من البريد الإلكتروني
-    emailVerificationCode: String,
-    emailVerificationExpires: Date,
-    emailVerified: {
-      type: Boolean,
-      default: false,
-    },
     profileImg: String, // صورة الملف الشخصي
-    // ✅ المساحة التخزينية
+    // 📦 إدارة المساحة التخزينية
     storageLimit: {
       type: Number,
-      default: 10 * 1024 * 1024 * 1024, // 10 GB بالبايت (10 * 1024 * 1024 * 1024)
+      default: 10 * 1024 * 1024 * 1024, // 10 GB بالبايت (10 * 1024^3)
     },
-    storageUsed: {
+    usedStorage: {
       type: Number,
       default: 0, // المساحة المستخدمة بالبايت
     },
@@ -62,18 +43,15 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// 2 - Encrypt password before saving (only for local auth)
-userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
-  // فقط تشفير الباسورد إذا كان authProvider = local
-  if (this.authProvider === 'local' && this.password) {
-    this.password = await bcrypt.hash(this.password, 12);
-  }
+// 2 - Encrypt password before saving
+userSchema.pre("save", async function (next) {
+  if (!this.isModified("password")) return next();
+  this.password = await bcrypt.hash(this.password, 12);
   next();
 });
 
 // 3 - Create model
-const User = mongoose.model('User', userSchema);
+const User = mongoose.model("User", userSchema);
 
 // 4 - Export model
 module.exports = User;

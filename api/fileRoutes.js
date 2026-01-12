@@ -16,7 +16,6 @@ const {
   toggleStarFile,
   getStarredFiles,
   updateFile,
-  updateFileContent,
   updateAllFolderSizes,
   shareFile,
   updateFilePermissions,
@@ -27,9 +26,7 @@ const {
   moveFile,
   getRootCategoriesStats,
   downloadFile,
-  viewFile,
   downloadFolder,
-  getStorageInfo,
 } = require("../services/fileService");
 const { protect } = require("../services/authService");
 const {
@@ -82,9 +79,6 @@ router.get("/category/:category", protect, getFilesByCategory);
 // Get categories statistics
 router.get("/categories/stats", protect, getCategoriesStats);
 
-// Get storage information
-router.get("/storage", protect, getStorageInfo);
-
 // Get trash files
 router.get("/trash", protect, getTrashFiles);
 
@@ -120,17 +114,11 @@ router.post("/:id/share", protect, shareFile);
 router.put("/:id/share", protect, updateFilePermissions);
 router.delete("/:id/share", protect, unshareFile);
 
-// Update file content (replace old file with new file) - must be before /:id
-router.put("/:id/content", protect, uploadSingleFileMiddleware, updateFileContent);
-
 // Update file metadata (must be before delete and get routes)
 router.put("/:id", protect, updateFile);
 
 // Delete file (move to trash)
 router.delete("/:id", protect, deleteFile);
-
-// View file (must be before /:id)
-router.get("/:id/view", protect, viewFile);
 
 // Download file (must be before /:id)
 router.get("/:id/download", protect, downloadFile);

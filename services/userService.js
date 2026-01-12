@@ -3,20 +3,39 @@ const bcrypt = require('bcryptjs');
 const createToken = require('../utils/createToken');
 const User = require('../models/userModel');
 const ApiError = require("../utils/apiError");
+const { transformUserProfileImage } = require('../utils/profileImageHelper');
+
 // @desc    Get Logged user data
 // @route   GET /api/v1/users/getMe
 // @access  Private
 exports.getLoggedUserData = asyncHandler(async (req, res, next) => {
-  const user = await User.findById(req.user._id);
-  if (!user) {
-    return res.status(404).json({ message: 'User not found' });
+  try {
+    console.log('📥 [userService] getLoggedUserData - Fetching user:', req.user._id);
+    
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      console.warn('⚠️ [userService] getLoggedUserData - User not found:', req.user._id);
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // ✅ تحويل profileImg إلى URL كامل
+    let userWithProfileUrl;
+    try {
+      userWithProfileUrl = transformUserProfileImage(user, req);
+      console.log('✅ [userService] getLoggedUserData - User data transformed successfully');
+    } catch (transformError) {
+      console.error('❌ [userService] getLoggedUserData - Error transforming profile image:', transformError.message);
+      console.error('Stack trace:', transformError.stack);
+      // Fallback: return user without transformation
+      userWithProfileUrl = user.toObject ? user.toObject() : user;
+    }
+    
+    res.status(200).json({ data: userWithProfileUrl });
+  } catch (error) {
+    console.error('❌ [userService] getLoggedUserData - Unexpected error:', error.message);
+    console.error('Stack trace:', error.stack);
+    return next(new ApiError('Failed to fetch user data', 500));
   }
-  
-  // ✅ تحويل profileImg إلى URL كامل
-  const { transformUserProfileImage } = require('../utils/profileImageHelper');
-  const userWithProfileUrl = transformUserProfileImage(user, req);
-  
-  res.status(200).json({ data: userWithProfileUrl });
 });
 
 // @desc    Update logged user password
@@ -41,8 +60,15 @@ exports.updateLoggedUserPassword = asyncHandler(async (req, res, next) => {
   await user.save();
 
   // ✅ تحويل profileImg إلى URL كامل
-  const { transformUserProfileImage } = require('../utils/profileImageHelper');
-  const userWithProfileUrl = transformUserProfileImage(user, req);
+  let userWithProfileUrl;
+  try {
+    userWithProfileUrl = transformUserProfileImage(user, req);
+    console.log('✅ [userService] updateLoggedUserPassword - User data transformed successfully');
+  } catch (transformError) {
+    console.error('❌ [userService] updateLoggedUserPassword - Error transforming profile image:', transformError.message);
+    // Fallback: return user without transformation
+    userWithProfileUrl = user.toObject ? user.toObject() : user;
+  }
 
   const token = createToken(user._id);
   res.status(200).json({ data: userWithProfileUrl, token });
@@ -80,8 +106,15 @@ exports.updateLoggedUserData = asyncHandler(async (req, res, next) => {
   }
 
   // ✅ تحويل profileImg إلى URL كامل
-  const { transformUserProfileImage } = require('../utils/profileImageHelper');
-  const userWithProfileUrl = transformUserProfileImage(updatedUser, req);
+  let userWithProfileUrl;
+  try {
+    userWithProfileUrl = transformUserProfileImage(updatedUser, req);
+    console.log('✅ [userService] updateLoggedUserData - User data transformed successfully');
+  } catch (transformError) {
+    console.error('❌ [userService] updateLoggedUserData - Error transforming profile image:', transformError.message);
+    // Fallback: return user without transformation
+    userWithProfileUrl = updatedUser.toObject ? updatedUser.toObject() : updatedUser;
+  }
 
   res.status(200).json({ data: userWithProfileUrl });
 });

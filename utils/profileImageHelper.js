@@ -1,55 +1,43 @@
 /**
- * Helper function to build full URL for profile image
- * @param {string} profileImg - Profile image filename (e.g., "user-profile-xxx.jpeg")
- * @param {Object} req - Express request object (optional, for building full URL)
- * @returns {string|null} - Full URL or null if profileImg is empty
+ * Build full URL for profile image
+ * @param {string} profileImg - Profile image filename
+ * @param {Object} req - Express request object (optional)
+ * @returns {string|null} - Full URL or null
  */
 function buildProfileImageUrl(profileImg, req = null) {
-  // If profileImg is null, undefined, or empty, return null
-  if (!profileImg || (typeof profileImg !== "string") || profileImg.trim() === "") {
+  if (!profileImg || profileImg.trim() === "") {
     return null;
   }
 
-  // If profileImg is already a full URL (starts with http:// or https://), return it as is
+  // If already a full URL, return as is
   if (profileImg.startsWith("http://") || profileImg.startsWith("https://")) {
     return profileImg;
   }
 
-  // Build base URL
+  // Build base URL from request or environment
   let baseUrl;
-  
   try {
     if (req) {
-      // Use request to build full URL
       const protocol = req.protocol || "http";
       const host = req.get("host") || "localhost:8000";
       baseUrl = `${protocol}://${host}`;
     } else {
-      // Fallback to environment variable or default
-      const frontendUrl = process.env.FRONTEND_URL || "";
-      const replacedUrl = frontendUrl ? frontendUrl.replace(":3000", ":8000") : "";
-      baseUrl = process.env.BASE_URL || replacedUrl || "http://localhost:8000";
+      baseUrl = process.env.BASE_URL || "http://localhost:8000";
     }
-
-    // Profile images are stored in uploads/users/ directory
-    // But the filename in DB doesn't include the directory path
-    // So we need to check if it's already a path or just a filename
-    let imagePath;
-    
-    if (profileImg.includes("/")) {
-      // Already includes path
-      imagePath = profileImg;
-    } else {
-      // Just filename, add users/ directory
-      imagePath = `users/${profileImg}`;
-    }
-
-    // Return full URL
-    return `${baseUrl}/uploads/${imagePath}`;
   } catch (error) {
-    console.error("Error building profile image URL:", error);
-    return null;
+    console.error("❌ [profileImageHelper] Error building base URL:", error.message);
+    baseUrl = process.env.BASE_URL || "http://localhost:8000";
   }
+
+  // Profile images are stored in uploads/users/ directory
+  let imagePath;
+  if (profileImg.includes("/")) {
+    imagePath = profileImg;
+  } else {
+    imagePath = `users/${profileImg}`;
+  }
+
+  return `${baseUrl}/uploads/${imagePath}`;
 }
 
 /**
@@ -59,62 +47,28 @@ function buildProfileImageUrl(profileImg, req = null) {
  * @returns {Object} - User object with profileImgUrl field
  */
 function transformUserProfileImage(user, req = null) {
-  if (!user) {
-    return user;
-  }
-
   try {
-    // Convert Mongoose document to plain object if needed
-    const userObj = user.toObject ? user.toObject() : user;
+    if (!user) {
+      console.warn("⚠️ [profileImageHelper] transformUserProfileImage called with null/undefined user");
+      return user;
+    }
 
-    // Build full URL
+    const userObj = user.toObject ? user.toObject() : user;
     const profileImgUrl = buildProfileImageUrl(userObj.profileImg, req);
 
-    // Add profileImgUrl field (keep original profileImg for backward compatibility)
     return {
       ...userObj,
       profileImgUrl: profileImgUrl,
     };
   } catch (error) {
-    console.error("Error transforming user profile image:", error);
-    // Return user as-is if transformation fails
+    console.error("❌ [profileImageHelper] Error transforming user profile image:", error.message);
+    console.error("Stack trace:", error.stack);
+    // Return original user object on error to prevent breaking the request
     return user.toObject ? user.toObject() : user;
   }
-}
-
-/**
- * Transform array of users to include full profile image URLs
- * @param {Array} users - Array of user objects
- * @param {Object} req - Express request object (optional)
- * @returns {Array} - Array of user objects with profileImgUrl field
- */
-function transformUsersProfileImages(users, req = null) {
-  if (!Array.isArray(users)) {
-    return users;
-  }
-
-  return users.map((user) => transformUserProfileImage(user, req));
 }
 
 module.exports = {
   buildProfileImageUrl,
   transformUserProfileImage,
-  transformUsersProfileImages,
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
