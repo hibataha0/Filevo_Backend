@@ -128,6 +128,67 @@ async function updateUserStorage(userId) {
   return currentUsedStorage;
 }
 
+// @desc    Get storage info for logged-in user
+// @route   GET /api/v1/files/storage
+// @access  Private
+exports.getStorageInfo = asyncHandler(async (req, res, next) => {
+  const userId = req.user._id;
+
+  const user = await User.findById(userId);
+  if (!user) {
+    return next(new ApiError("User not found", 404));
+  }
+
+  // Calculate actual used storage from all non-deleted files
+  const totalUsedStorage = await File.aggregate([
+    {
+      $match: {
+        userId: user._id,
+        isDeleted: false,
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        totalSize: { $sum: "$size" },
+      },
+    },
+  ]);
+
+  const currentUsedStorage =
+    totalUsedStorage.length > 0 ? totalUsedStorage[0].totalSize : 0;
+
+  // Update user's usedStorage to match actual usage
+  user.usedStorage = currentUsedStorage;
+  await user.save();
+
+  const storageLimit = user.storageLimit || 10 * 1024 * 1024 * 1024; // Default 10GB
+  const availableSpace = storageLimit - currentUsedStorage;
+  const usedPercentage = (currentUsedStorage / storageLimit) * 100;
+
+  // Format bytes helper
+  const formatBytes = (bytes) => {
+    if (bytes === 0) return "0 Bytes";
+    const k = 1024;
+    const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  };
+
+  res.status(200).json({
+    message: "Storage info retrieved successfully",
+    storage: {
+      used: currentUsedStorage,
+      usedFormatted: formatBytes(currentUsedStorage),
+      limit: storageLimit,
+      limitFormatted: formatBytes(storageLimit),
+      available: availableSpace,
+      availableFormatted: formatBytes(availableSpace),
+      usedPercentage: Math.round(usedPercentage * 100) / 100,
+    },
+  });
+});
+
 // @desc    Upload multiple files
 // @route   POST /api/files/upload-multiple
 // @access  Private
@@ -582,17 +643,85 @@ exports.getRecentFiles = asyncHandler(async (req, res) => {
   const userId = req.user._id;
   const limit = parseInt(req.query.limit) || 10;
 
-  // ✅ استخدام select لتحديد الحقول فقط + lean() + إزالة populate غير الضروري
-  const files = await File.find({ userId, isDeleted: false })
-    .select("name type size path category parentFolderId isStarred createdAt updatedAt")
-    .sort({ createdAt: -1 })
-    .limit(limit)
+  // ✅ Get all protected folder IDs (to exclude files inside protected folders)
+  const Folder = require("../models/folderModel");
+  const protectedFolderIds = await Folder.find({
+    userId: userId,
+    isProtected: true,
+    isDeleted: false,
+  }).distinct("_id");
+
+  // ✅ Get all folders to build parent chain map
+  const allFolders = await Folder.find({
+    userId: userId,
+    isDeleted: false,
+  })
+    .select("_id parentId isProtected")
     .lean();
+
+  // ✅ Build a map of folderId -> all ancestor IDs (including itself)
+  const folderAncestorsMap = new Map();
+
+  function getAllAncestors(folderId) {
+    if (folderAncestorsMap.has(folderId.toString())) {
+      return folderAncestorsMap.get(folderId.toString());
+    }
+
+    const ancestors = [folderId];
+    const folder = allFolders.find(
+      (f) => f._id.toString() === folderId.toString()
+    );
+
+    if (folder && folder.parentId) {
+      const parentAncestors = getAllAncestors(folder.parentId);
+      ancestors.push(...parentAncestors);
+    }
+
+    folderAncestorsMap.set(folderId.toString(), ancestors);
+    return ancestors;
+  }
+
+  // ✅ Pre-build ancestors for all protected folders
+  protectedFolderIds.forEach((pid) => {
+    getAllAncestors(pid);
+  });
+
+  // ✅ Get all files
+  const allFiles = await File.find({ userId, isDeleted: false })
+    .select(
+      "name type size path category parentFolderId isStarred createdAt updatedAt"
+    )
+    .sort({ createdAt: -1 })
+    .lean();
+
+  // ✅ Filter out files that are inside protected folders (directly or indirectly)
+  const filteredFiles = [];
+  for (const file of allFiles) {
+    if (!file.parentFolderId) {
+      // File in root - include it
+      filteredFiles.push(file);
+    } else {
+      // Check if file's parent folder or any ancestor is protected
+      const ancestors = getAllAncestors(file.parentFolderId);
+      const isInsideProtectedFolder = ancestors.some((ancestorId) =>
+        protectedFolderIds.some(
+          (pid) => pid.toString() === ancestorId.toString()
+        )
+      );
+
+      if (!isInsideProtectedFolder) {
+        filteredFiles.push(file);
+      }
+    }
+
+    // Stop if we have enough files
+    if (filteredFiles.length >= limit) break;
+  }
 
   res.status(200).json({
     message: "Recent files retrieved successfully",
-    count: files.length,
-    files,
+    count: filteredFiles.length,
+    files: filteredFiles.slice(0, limit),
   });
 });
 
@@ -668,6 +797,13 @@ exports.deleteFile = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "File is already deleted" });
   }
 
+  // ✅ Check if file is shared in any rooms
+  const Room = require("../models/roomModel");
+  const roomsWithFile = await Room.find({
+    "files.fileId": fileId,
+    isActive: true,
+  }).select("name _id");
+
   // Set deleted status with 30 days expiry
   const now = new Date();
   const expiryDate = new Date(now);
@@ -677,6 +813,31 @@ exports.deleteFile = asyncHandler(async (req, res) => {
   file.deletedAt = now;
   file.deleteExpiryDate = expiryDate;
   await file.save();
+
+  // ✅ Remove file from all rooms (if shared)
+  if (roomsWithFile.length > 0) {
+    await Room.updateMany(
+      { "files.fileId": fileId },
+      { $pull: { files: { fileId: fileId } } }
+    );
+
+    // Log activity for each room
+    const { logActivity } = require("./activityLogService");
+    for (const room of roomsWithFile) {
+      await logActivity(
+        userId,
+        "file_removed_from_room_on_delete",
+        "file",
+        file._id,
+        file.name,
+        {
+          roomId: room._id,
+          roomName: room.name,
+          reason: "File deleted by owner",
+        }
+      );
+    }
+  }
 
   // Log activity
   await logActivity(
@@ -690,6 +851,7 @@ exports.deleteFile = asyncHandler(async (req, res) => {
       type: file.type,
       category: file.category,
       deleteExpiryDate: expiryDate,
+      roomsRemovedFrom: roomsWithFile.length,
     },
     {
       ipAddress: req.ip,
@@ -701,6 +863,14 @@ exports.deleteFile = asyncHandler(async (req, res) => {
     message: "✅ File moved to trash successfully",
     file: file,
     deleteExpiryDate: expiryDate,
+    warning:
+      roomsWithFile.length > 0
+        ? `⚠️ This file was shared in ${roomsWithFile.length} room(s) and has been removed from them: ${roomsWithFile.map((r) => r.name).join(", ")}`
+        : null,
+    roomsRemovedFrom: roomsWithFile.map((r) => ({
+      _id: r._id,
+      name: r.name,
+    })),
   });
 });
 
@@ -772,10 +942,41 @@ exports.deleteFilePermanent = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "File not found" });
   }
 
+  // ✅ Check if file is shared in any rooms
+  const Room = require("../models/roomModel");
+  const roomsWithFile = await Room.find({
+    "files.fileId": fileId,
+    isActive: true,
+  }).select("name _id");
+
   // Delete physical file
   const filePath = path.join(__dirname, "..", file.path);
   if (fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
+  }
+
+  // ✅ Remove file from all rooms BEFORE deleting from database
+  if (roomsWithFile.length > 0) {
+    await Room.updateMany(
+      { "files.fileId": fileId },
+      { $pull: { files: { fileId: fileId } } }
+    );
+
+    // Log activity for each room
+    for (const room of roomsWithFile) {
+      await logActivity(
+        userId,
+        "file_removed_from_room_on_delete",
+        "file",
+        fileId,
+        file.name,
+        {
+          roomId: room._id,
+          roomName: room.name,
+          reason: "File permanently deleted by owner",
+        }
+      );
+    }
   }
 
   // Delete from database
@@ -795,6 +996,7 @@ exports.deleteFilePermanent = asyncHandler(async (req, res) => {
       originalSize: file.size,
       type: file.type,
       category: file.category,
+      roomsRemovedFrom: roomsWithFile.length,
     },
     {
       ipAddress: req.ip,
@@ -804,6 +1006,14 @@ exports.deleteFilePermanent = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     message: "✅ File deleted permanently",
+    warning:
+      roomsWithFile.length > 0
+        ? `⚠️ This file was shared in ${roomsWithFile.length} room(s) and has been removed from them: ${roomsWithFile.map((r) => r.name).join(", ")}`
+        : null,
+    roomsRemovedFrom: roomsWithFile.map((r) => ({
+      _id: r._id,
+      name: r.name,
+    })),
   });
 });
 
@@ -816,20 +1026,31 @@ exports.getTrashFiles = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 20;
   const skip = (page - 1) * limit;
 
-  // Get deleted files
-  const files = await File.find({
+  // ✅ Get all deleted folder IDs (to exclude files inside deleted folders)
+  const Folder = require("../models/folderModel");
+  const deletedFolderIds = await Folder.find({
     userId: userId,
     isDeleted: true,
-  })
+  }).distinct("_id");
+
+  // ✅ Get deleted files that are NOT inside deleted folders
+  // Files with parentFolderId = null OR parentFolderId NOT in deletedFolderIds
+  const fileQuery = {
+    userId: userId,
+    isDeleted: true,
+    $or: [
+      { parentFolderId: null }, // Files in root
+      { parentFolderId: { $nin: deletedFolderIds } }, // Files in non-deleted folders
+    ],
+  };
+
+  const files = await File.find(fileQuery)
     .sort({ deletedAt: -1 })
     .skip(skip)
     .limit(limit)
     .populate("parentFolderId", "name");
 
-  const totalFiles = await File.countDocuments({
-    userId: userId,
-    isDeleted: true,
-  });
+  const totalFiles = await File.countDocuments(fileQuery);
 
   res.status(200).json({
     message: "Trash files retrieved successfully",
@@ -1004,7 +1225,8 @@ exports.updateFile = asyncHandler(async (req, res) => {
   // Update parent folder if provided
   if (
     parentFolderId !== undefined &&
-    parentFolderId !== file.parentFolderId?.toString()
+    parentFolderId !==
+      (file.parentFolderId ? file.parentFolderId.toString() : null)
   ) {
     // If moving to a specific folder, verify it exists and belongs to user
     if (parentFolderId) {
@@ -1053,7 +1275,8 @@ exports.updateFile = asyncHandler(async (req, res) => {
         tagsChanged: tags !== undefined,
         parentFolderChanged:
           parentFolderId !== undefined &&
-          parentFolderId !== file.parentFolderId?.toString(),
+          parentFolderId !==
+            (file.parentFolderId ? file.parentFolderId.toString() : null),
       },
       originalSize: file.size,
       type: file.type,
@@ -1936,11 +2159,14 @@ async function calculateRootStats(userId) {
     });
   });
 
-  return categories.map((cat) => ({
-    category: cat,
-    filesCount: map.get(cat)?.filesCount || 0,
-    totalSize: map.get(cat)?.totalSize || 0,
-  }));
+  return categories.map((cat) => {
+    const catData = map.get(cat);
+    return {
+      category: cat,
+      filesCount: (catData && catData.filesCount) || 0,
+      totalSize: (catData && catData.totalSize) || 0,
+    };
+  });
 }
 
 // @desc    Download file (user's own file)

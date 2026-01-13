@@ -27,6 +27,7 @@ const {
   getRootCategoriesStats,
   downloadFile,
   downloadFolder,
+  getStorageInfo,
 } = require("../services/fileService");
 const { protect } = require("../services/authService");
 const {
@@ -79,6 +80,9 @@ router.get("/category/:category", protect, getFilesByCategory);
 // Get categories statistics
 router.get("/categories/stats", protect, getCategoriesStats);
 
+// Get root categories statistics (must be before /:id)
+router.get("/categories/stats/root", protect, getRootCategoriesStats);
+
 // Get trash files
 router.get("/trash", protect, getTrashFiles);
 
@@ -87,6 +91,9 @@ router.get("/starred", protect, getStarredFiles);
 
 // Get files shared with me
 router.get("/shared-with-me", protect, getFilesSharedWithMe);
+
+// Get storage info (must be before /:id)
+router.get("/storage", protect, getStorageInfo);
 
 // Get shared file details in room (must be before /:id)
 router.get("/shared-in-room/:id", protect, getSharedFileDetailsInRoom);
@@ -125,6 +132,5 @@ router.get("/:id/download", protect, downloadFile);
 
 // Get file details
 router.get("/:id", protect, getFileDetails);
-router.get("/categories/stats/root", protect, getRootCategoriesStats);
 
 module.exports = router;

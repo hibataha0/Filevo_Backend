@@ -1017,16 +1017,116 @@ exports.leaveRoom = asyncHandler(async (req, res, next) => {
     (m) => m.user.toString() !== userId.toString()
   );
 
+  // ✅ Get files and folders shared by this user BEFORE removing them (for logging)
+  const filesToRemove = room.files.filter((fileEntry) => {
+    const sharedByUserId =
+      fileEntry.sharedBy &&
+      (fileEntry.sharedBy._id
+        ? fileEntry.sharedBy._id.toString()
+        : fileEntry.sharedBy.toString());
+    return sharedByUserId === userId.toString();
+  });
+
+  const foldersToRemove = room.folders.filter((folderEntry) => {
+    const sharedByUserId =
+      folderEntry.sharedBy &&
+      (folderEntry.sharedBy._id
+        ? folderEntry.sharedBy._id.toString()
+        : folderEntry.sharedBy.toString());
+    return sharedByUserId === userId.toString();
+  });
+
+  // ✅ Remove files shared by this user from the room
+  room.files = room.files.filter((fileEntry) => {
+    const sharedByUserId =
+      fileEntry.sharedBy &&
+      (fileEntry.sharedBy._id
+        ? fileEntry.sharedBy._id.toString()
+        : fileEntry.sharedBy.toString());
+    return sharedByUserId !== userId.toString();
+  });
+
+  // ✅ Remove folders shared by this user from the room
+  room.folders = room.folders.filter((folderEntry) => {
+    const sharedByUserId =
+      folderEntry.sharedBy &&
+      (folderEntry.sharedBy._id
+        ? folderEntry.sharedBy._id.toString()
+        : folderEntry.sharedBy.toString());
+    return sharedByUserId !== userId.toString();
+  });
+
   await room.save();
 
-  // Log activity
+  // Log activity for files removed
+  if (filesToRemove.length > 0) {
+    const File = require("../models/fileModel");
+    // Populate fileId for logging
+    const fileIds = filesToRemove.map((f) => f.fileId);
+    const files = await File.find({ _id: { $in: fileIds } }).select("name _id");
+
+    for (const fileEntry of filesToRemove) {
+      const file = files.find(
+        (f) => f._id.toString() === fileEntry.fileId.toString()
+      );
+      if (file) {
+        await logActivity(
+          userId,
+          "file_removed_from_room_on_leave",
+          "file",
+          file._id,
+          file.name || "Unknown",
+          {
+            roomId: roomId,
+            roomName: room.name,
+            reason: "User left the room",
+          }
+        );
+      }
+    }
+  }
+
+  // Log activity for folders removed
+  if (foldersToRemove.length > 0) {
+    const Folder = require("../models/folderModel");
+    // Populate folderId for logging
+    const folderIds = foldersToRemove.map((f) => f.folderId);
+    const folders = await Folder.find({ _id: { $in: folderIds } }).select(
+      "name _id"
+    );
+
+    for (const folderEntry of foldersToRemove) {
+      const folder = folders.find(
+        (f) => f._id.toString() === folderEntry.folderId.toString()
+      );
+      if (folder) {
+        await logActivity(
+          userId,
+          "folder_removed_from_room_on_leave",
+          "folder",
+          folder._id,
+          folder.name || "Unknown",
+          {
+            roomId: roomId,
+            roomName: room.name,
+            reason: "User left the room",
+          }
+        );
+      }
+    }
+  }
+
+  // Log activity for leaving room
   await logActivity(
     userId,
     "room_left",
     "room",
     roomId,
     room.name,
-    {},
+    {
+      filesRemoved: filesToRemove.length,
+      foldersRemoved: foldersToRemove.length,
+    },
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
@@ -1035,6 +1135,10 @@ exports.leaveRoom = asyncHandler(async (req, res, next) => {
 
   res.status(200).json({
     message: "✅ You have left the room successfully",
+    details: {
+      filesRemoved: filesToRemove.length,
+      foldersRemoved: foldersToRemove.length,
+    },
     room: room,
   });
 });
@@ -1587,8 +1691,10 @@ exports.removeFileFromRoom = asyncHandler(async (req, res, next) => {
 
   const userId = req.user._id;
 
-  // Find room
-  const room = await Room.findById(roomId).populate("files.fileId");
+  // Find room with populated file userId
+  const room = await Room.findById(roomId)
+    .populate("files.fileId", "name userId")
+    .populate("files.sharedBy", "_id");
   if (!room) {
     return next(new ApiError("Room not found", 404));
   }
@@ -1635,13 +1741,24 @@ exports.removeFileFromRoom = asyncHandler(async (req, res, next) => {
       : fileEntry.sharedBy.toString());
   const isFileSharer = sharedByUserId === userId.toString();
 
-  // Check if user is file owner
-  const fileUserId =
-    file.userId &&
-    (file.userId._id ? file.userId._id.toString() : file.userId.toString());
-  const isFileOwner = fileUserId === userId.toString();
+  // Check if user is file owner (the one who uploaded/created the file)
+  let fileUserId = null;
+  if (file.userId) {
+    if (file.userId._id) {
+      fileUserId = file.userId._id.toString();
+    } else if (file.userId.toString) {
+      fileUserId = file.userId.toString();
+    } else {
+      fileUserId = file.userId;
+    }
+  }
+  const isFileOwner = fileUserId && fileUserId === userId.toString();
 
-  // Allow room owner, file owner, file sharer, or members with owner/editor role to remove files
+  // ✅ Allow deletion if user is:
+  // 1. Room owner
+  // 2. File owner (the one who uploaded/created the file) ✅
+  // 3. File sharer (the one who shared it to the room) ✅
+  // 4. Members with owner/editor role
   if (
     !isRoomOwner &&
     !isFileOwner &&
@@ -1651,7 +1768,7 @@ exports.removeFileFromRoom = asyncHandler(async (req, res, next) => {
   ) {
     return next(
       new ApiError(
-        "Only room owner, file owner, file sharer, or members with owner/editor role can remove files",
+        "Only room owner, file owner (uploader), file sharer, or members with owner/editor role can remove files",
         403
       )
     );
@@ -1708,8 +1825,10 @@ exports.removeFolderFromRoom = asyncHandler(async (req, res, next) => {
 
   const userId = req.user._id;
 
-  // Find room
-  const room = await Room.findById(roomId).populate("folders.folderId");
+  // Find room with populated folder userId
+  const room = await Room.findById(roomId)
+    .populate("folders.folderId", "name userId")
+    .populate("folders.sharedBy", "_id");
   if (!room) {
     return next(new ApiError("Room not found", 404));
   }
@@ -1759,15 +1878,24 @@ exports.removeFolderFromRoom = asyncHandler(async (req, res, next) => {
       : folderEntry.sharedBy.toString());
   const isFolderSharer = sharedByUserId === userId.toString();
 
-  // Check if user is folder owner
-  const folderUserId =
-    folder.userId &&
-    (folder.userId._id
-      ? folder.userId._id.toString()
-      : folder.userId.toString());
-  const isFolderOwner = folderUserId === userId.toString();
+  // Check if user is folder owner (the one who created/uploaded the folder)
+  let folderUserId = null;
+  if (folder.userId) {
+    if (folder.userId._id) {
+      folderUserId = folder.userId._id.toString();
+    } else if (folder.userId.toString) {
+      folderUserId = folder.userId.toString();
+    } else {
+      folderUserId = folder.userId;
+    }
+  }
+  const isFolderOwner = folderUserId && folderUserId === userId.toString();
 
-  // Allow room owner, folder owner, folder sharer, or members with owner/editor role to remove folders
+  // ✅ Allow deletion if user is:
+  // 1. Room owner
+  // 2. Folder owner (the one who created/uploaded the folder) ✅
+  // 3. Folder sharer (the one who shared it to the room) ✅
+  // 4. Members with owner/editor role
   if (
     !isRoomOwner &&
     !isFolderOwner &&
@@ -1777,7 +1905,7 @@ exports.removeFolderFromRoom = asyncHandler(async (req, res, next) => {
   ) {
     return next(
       new ApiError(
-        "Only room owner, folder owner, folder sharer, or members with owner/editor role can remove folders",
+        "Only room owner, folder owner (uploader), folder sharer, or members with owner/editor role can remove folders",
         403
       )
     );

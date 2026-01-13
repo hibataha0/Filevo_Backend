@@ -245,6 +245,16 @@ async function deleteFolderRecursive(folderId, userId) {
   // Find all files in this folder
   const files = await File.find({ parentFolderId: folderId, userId: userId });
 
+  // ✅ Remove files from rooms before deleting them
+  const Room = require("../models/roomModel");
+  const fileIds = files.map((f) => f._id);
+  if (fileIds.length > 0) {
+    await Room.updateMany(
+      { "files.fileId": { $in: fileIds } },
+      { $pull: { files: { fileId: { $in: fileIds } } } }
+    );
+  }
+
   // Delete physical files from file system
   for (const file of files) {
     const filePath = path.join(__dirname, "..", file.path);
@@ -263,6 +273,12 @@ async function deleteFolderRecursive(folderId, userId) {
 
   // Delete all subfolders from database (should be empty now after recursive deletion)
   await Folder.deleteMany({ parentId: folderId, userId: userId });
+
+  // ✅ Remove folder from all rooms before deleting
+  await Room.updateMany(
+    { "folders.folderId": folderId },
+    { $pull: { folders: { folderId: folderId } } }
+  );
 
   // Try to delete the physical folder if it exists
   const folderPath = path.join(__dirname, "..", folder.path);
@@ -642,10 +658,17 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
   const isOwner =
     (folder.userId._id || folder.userId).toString() === userId.toString();
   const isSharedWith =
-    folder.sharedWith?.some((sw) => {
-      const userIdInShared = sw.user?._id?.toString() || sw.user?.toString();
-      return userIdInShared === userId.toString();
-    }) || false;
+    folder.sharedWith && folder.sharedWith.some
+      ? folder.sharedWith.some((sw) => {
+          const userIdInShared =
+            sw.user && sw.user._id
+              ? sw.user._id.toString()
+              : sw.user
+                ? sw.user.toString()
+                : null;
+          return userIdInShared === userId.toString();
+        })
+      : false;
 
   // Check if folder is shared in a room where user is a member
   let isSharedInRoom = false;
@@ -681,16 +704,19 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
     isSharedInRoom = !!room;
 
     if (room) {
-      const folderInRoom = room.folders?.find(
-        (f) => f.folderId?.toString() === folderId
-      );
+      const folderInRoom =
+        room.folders && room.folders.find
+          ? room.folders.find(
+              (f) => (f.folderId ? f.folderId.toString() : null) === folderId
+            )
+          : null;
       roomInfo = {
         _id: room._id,
         name: room.name,
         description: room.description,
       };
 
-      if (folderInRoom?.sharedBy) {
+      if (folderInRoom && folderInRoom.sharedBy) {
         const sharedByUser = await User.findById(folderInRoom.sharedBy)
           .select("name email")
           .lean();
@@ -1046,17 +1072,95 @@ exports.getRecentFolders = asyncHandler(async (req, res, next) => {
   const userId = req.user._id;
   const limit = parseInt(req.query.limit) || 10;
 
-  const folders = await Folder.find({ userId, isDeleted: false })
-    .sort({ createdAt: -1 })
-    .limit(limit);
+  // ✅ Get all protected folder IDs (to exclude folders inside protected folders)
+  const protectedFolderIds = await Folder.find({
+    userId: userId,
+    isProtected: true,
+    isDeleted: false,
+  }).distinct("_id");
 
-  // ✅ استخدام الحقول المحفوظة مباشرة بدلاً من الحساب recursive
-  const foldersWithDetails = folders.map((folder) => {
-    const folderObj = folder.toObject();
-    folderObj.size = folder.size || 0;
-    folderObj.filesCount = folder.filesCount || 0;
-    return folderObj;
+  // ✅ Get all folders to build parent chain map
+  const allFoldersForMap = await Folder.find({
+    userId: userId,
+    isDeleted: false,
+  })
+    .select("_id parentId isProtected")
+    .lean();
+
+  // ✅ Build a map of folderId -> all ancestor IDs (including itself)
+  const folderAncestorsMap = new Map();
+
+  function getAllAncestors(folderId) {
+    if (folderAncestorsMap.has(folderId.toString())) {
+      return folderAncestorsMap.get(folderId.toString());
+    }
+
+    const ancestors = [folderId];
+    const folder = allFoldersForMap.find(
+      (f) => f._id.toString() === folderId.toString()
+    );
+
+    if (folder && folder.parentId) {
+      const parentAncestors = getAllAncestors(folder.parentId);
+      ancestors.push(...parentAncestors);
+    }
+
+    folderAncestorsMap.set(folderId.toString(), ancestors);
+    return ancestors;
+  }
+
+  // ✅ Pre-build ancestors for all protected folders
+  protectedFolderIds.forEach((pid) => {
+    getAllAncestors(pid);
   });
+
+  // ✅ Get all folders
+  const allFolders = await Folder.find({ userId, isDeleted: false })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  // ✅ Filter out folders that are inside protected folders (directly or indirectly)
+  const filteredFolders = [];
+  for (const folder of allFolders) {
+    if (!folder.parentId) {
+      // Folder in root - include it
+      filteredFolders.push(folder);
+    } else {
+      // Check if folder's parent folder or any ancestor is protected
+      const ancestors = getAllAncestors(folder.parentId);
+      const isInsideProtectedFolder = ancestors.some((ancestorId) =>
+        protectedFolderIds.some(
+          (pid) => pid.toString() === ancestorId.toString()
+        )
+      );
+
+      if (!isInsideProtectedFolder) {
+        filteredFolders.push(folder);
+      }
+    }
+
+    // Stop if we have enough folders
+    if (filteredFolders.length >= limit) break;
+  }
+
+  // ✅ حساب الحجم وعدد الملفات بشكل recursive لكل مجلد
+  const foldersWithDetails = await Promise.all(
+    filteredFolders.slice(0, limit).map(async (folder) => {
+      const folderObj = folder.toObject ? folder.toObject() : { ...folder };
+
+      // ✅ حساب الإحصائيات بشكل recursive (أكثر دقة)
+      const stats = await calculateFolderStatsRecursive(folder._id);
+      const size = stats && stats.size !== undefined ? stats.size : 0;
+      const filesCount =
+        stats && stats.filesCount !== undefined ? stats.filesCount : 0;
+
+      // ✅ تحديث القيم في المجلد
+      folderObj.size = Number(size) || 0;
+      folderObj.filesCount = Number(filesCount) || 0;
+
+      return folderObj;
+    })
+  );
 
   res.status(200).json({
     message: "Recent folders retrieved successfully",
@@ -1075,6 +1179,13 @@ exports.deleteFolder = asyncHandler(async (req, res, next) => {
   if (!folder) {
     return next(new ApiError("Folder not found", 404));
   }
+
+  // ✅ Check if folder is shared in any rooms
+  const Room = require("../models/roomModel");
+  const roomsWithFolder = await Room.find({
+    "folders.folderId": folderId,
+    isActive: true,
+  }).select("name _id");
 
   // Mark folder as deleted
   folder.isDeleted = true;
@@ -1121,9 +1232,42 @@ exports.deleteFolder = asyncHandler(async (req, res, next) => {
     { isDeleted: true, deletedAt: new Date() }
   );
 
+  // ✅ Remove folder from all rooms (if shared)
+  if (roomsWithFolder.length > 0) {
+    await Room.updateMany(
+      { "folders.folderId": folderId },
+      { $pull: { folders: { folderId: folderId } } }
+    );
+
+    // Log activity for each room
+    const { logActivity } = require("./activityLogService");
+    for (const room of roomsWithFolder) {
+      await logActivity(
+        userId,
+        "folder_removed_from_room_on_delete",
+        "folder",
+        folder._id,
+        folder.name,
+        {
+          roomId: room._id,
+          roomName: room.name,
+          reason: "Folder deleted by owner",
+        }
+      );
+    }
+  }
+
   res.status(200).json({
     message: "✅ Folder deleted successfully",
     folder: folder,
+    warning:
+      roomsWithFolder.length > 0
+        ? `⚠️ This folder was shared in ${roomsWithFolder.length} room(s) and has been removed from them: ${roomsWithFolder.map((r) => r.name).join(", ")}`
+        : null,
+    roomsRemovedFrom: roomsWithFolder.map((r) => ({
+      _id: r._id,
+      name: r.name,
+    })),
   });
 });
 
@@ -1139,16 +1283,83 @@ exports.restoreFolder = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Folder not found", 404));
   }
 
+  // ✅ Restore folder
   folder.isDeleted = false;
   folder.deletedAt = null;
   await folder.save();
 
+  // ✅ Helper function to recursively restore subfolders
+  async function restoreSubfoldersRecursive(parentId) {
+    const subfolders = await Folder.find({
+      parentId: parentId,
+      userId: userId,
+      isDeleted: true, // Only restore deleted folders
+    });
+
+    for (const subfolder of subfolders) {
+      subfolder.isDeleted = false;
+      subfolder.deletedAt = null;
+      await subfolder.save();
+      // Recursively restore children
+      await restoreSubfoldersRecursive(subfolder._id);
+    }
+  }
+
+  // ✅ Get all folder IDs including subfolders (for restoring files)
+  async function getAllSubfolderIds(parentId) {
+    const folderIds = [parentId];
+    const subfolders = await Folder.find({
+      parentId: parentId,
+      userId: userId,
+    });
+    for (const subfolder of subfolders) {
+      const childIds = await getAllSubfolderIds(subfolder._id);
+      folderIds.push(...childIds);
+    }
+    return folderIds;
+  }
+
+  // ✅ Restore all subfolders recursively
+  await restoreSubfoldersRecursive(folderId);
+
+  // ✅ Restore all files in this folder and subfolders
+  const allFolderIds = await getAllSubfolderIds(folderId);
+  const filesRestored = await File.updateMany(
+    {
+      parentFolderId: { $in: allFolderIds },
+      userId: userId,
+      isDeleted: true, // Only restore deleted files
+    },
+    {
+      isDeleted: false,
+      deletedAt: null,
+      deleteExpiryDate: null,
+    }
+  );
+
   // ✅ تحديث المساحة المستخدمة بعد الاستعادة (للتأكد من دقة المساحة)
   await updateUserStorage(userId);
+
+  // Log activity
+  await logActivity(
+    userId,
+    "folder_restored",
+    "folder",
+    folder._id,
+    folder.name,
+    {
+      filesRestored: filesRestored.modifiedCount || 0,
+    },
+    {
+      ipAddress: req.ip,
+      userAgent: req.get("User-Agent"),
+    }
+  );
 
   res.status(200).json({
     message: "✅ Folder restored successfully",
     folder: folder,
+    filesRestored: filesRestored.modifiedCount || 0,
   });
 });
 
@@ -1164,11 +1375,66 @@ exports.deleteFolderPermanent = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Folder not found", 404));
   }
 
+  // ✅ Check if folder is shared in any rooms BEFORE deletion
+  const Room = require("../models/roomModel");
+  const roomsWithFolder = await Room.find({
+    "folders.folderId": folderId,
+    isActive: true,
+  }).select("name _id");
+
+  // Get all files in folder and subfolders to check rooms
+  async function getAllSubfolderIds(parentId) {
+    const folderIds = [parentId];
+    const subfolders = await Folder.find({
+      parentId: parentId,
+      userId: userId,
+    });
+    for (const subfolder of subfolders) {
+      const childIds = await getAllSubfolderIds(subfolder._id);
+      folderIds.push(...childIds);
+    }
+    return folderIds;
+  }
+
+  const allFolderIds = await getAllSubfolderIds(folderId);
+  const filesInFolder = await File.find({
+    parentFolderId: { $in: allFolderIds },
+    userId: userId,
+  }).select("_id name");
+
+  // Get rooms with files from this folder
+  const fileIds = filesInFolder.map((f) => f._id);
+  const roomsWithFiles =
+    fileIds.length > 0
+      ? await Room.find({
+          "files.fileId": { $in: fileIds },
+          isActive: true,
+        }).select("name _id")
+      : [];
+
   // Recursively delete folder and all its contents
+  // (deleteFolderRecursive already removes from rooms)
   await deleteFolderRecursive(folderId, userId);
 
   // ✅ تحديث المساحة المستخدمة بعد الحذف النهائي
   await updateUserStorage(userId);
+
+  // Log activity for rooms
+  const { logActivity } = require("./activityLogService");
+  for (const room of roomsWithFolder) {
+    await logActivity(
+      userId,
+      "folder_removed_from_room_on_delete",
+      "folder",
+      folderId,
+      folder.name,
+      {
+        roomId: room._id,
+        roomName: room.name,
+        reason: "Folder permanently deleted by owner",
+      }
+    );
+  }
 
   // Log activity
   await logActivity(
@@ -1179,6 +1445,8 @@ exports.deleteFolderPermanent = asyncHandler(async (req, res, next) => {
     folder.name,
     {
       originalSize: folder.size,
+      roomsRemovedFrom: roomsWithFolder.length,
+      filesRemovedFromRooms: roomsWithFiles.length,
     },
     {
       ipAddress: req.ip,
@@ -1186,8 +1454,25 @@ exports.deleteFolderPermanent = asyncHandler(async (req, res, next) => {
     }
   );
 
+  const allAffectedRooms = [
+    ...roomsWithFolder.map((r) => ({
+      _id: r._id,
+      name: r.name,
+      type: "folder",
+    })),
+    ...roomsWithFiles.map((r) => ({ _id: r._id, name: r.name, type: "files" })),
+  ];
+  const uniqueRooms = Array.from(
+    new Map(allAffectedRooms.map((r) => [r._id.toString(), r])).values()
+  );
+
   res.status(200).json({
     message: "✅ Folder and all its contents deleted permanently",
+    warning:
+      uniqueRooms.length > 0
+        ? `⚠️ This folder and its files were shared in ${uniqueRooms.length} room(s) and have been removed from them: ${uniqueRooms.map((r) => r.name).join(", ")}`
+        : null,
+    roomsRemovedFrom: uniqueRooms,
   });
 });
 
@@ -1200,12 +1485,29 @@ exports.getTrashFolders = asyncHandler(async (req, res, next) => {
   const limit = parseInt(req.query.limit) || 20;
   const skip = (page - 1) * limit;
 
-  const folders = await Folder.find({ userId, isDeleted: true })
+  // ✅ Get all deleted folder IDs (to exclude subfolders inside deleted folders)
+  const deletedFolderIds = await Folder.find({
+    userId: userId,
+    isDeleted: true,
+  }).distinct("_id");
+
+  // ✅ Get deleted folders that are NOT inside deleted folders
+  // Folders with parentId = null OR parentId NOT in deletedFolderIds
+  const folderQuery = {
+    userId: userId,
+    isDeleted: true,
+    $or: [
+      { parentId: null }, // Folders in root
+      { parentId: { $nin: deletedFolderIds } }, // Folders in non-deleted folders
+    ],
+  };
+
+  const folders = await Folder.find(folderQuery)
     .sort({ deletedAt: -1 })
     .skip(skip)
     .limit(limit);
 
-  const totalFolders = await Folder.countDocuments({ userId, isDeleted: true });
+  const totalFolders = await Folder.countDocuments(folderQuery);
 
   // ✅ حساب الحجم وعدد الملفات لكل مجلد (حتى المحذوفة، إذا كانت البيانات موجودة)
   const foldersWithDetails = await Promise.all(
@@ -1809,7 +2111,12 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
 
   // Check if folder is shared with user
   const isSharedWith = folder.sharedWith.some((sw) => {
-    const userIdInShared = sw.user?._id?.toString() || sw.user?.toString();
+    const userIdInShared =
+      sw.user && sw.user._id
+        ? sw.user._id.toString()
+        : sw.user
+          ? sw.user.toString()
+          : null;
     return userIdInShared === userId.toString();
   });
 
