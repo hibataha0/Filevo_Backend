@@ -4,6 +4,7 @@ const RoomInvitation = require("../models/roomInvitationModel");
 const User = require("../models/userModel");
 const ApiError = require("../utils/apiError");
 const { logActivity } = require("./activityLogService");
+const { emitNewFile, emitNewFolder } = require("../socket");
 
 // Helper function to get permissions based on role
 const getPermissionsFromRole = (role) => {
@@ -1221,6 +1222,18 @@ exports.shareFileWithRoom = asyncHandler(async (req, res, next) => {
     }
   );
 
+  // ✅ إرسال إشعار socket.io للملف المشترك
+  if (global.io) {
+    const fileData = {
+      _id: file._id,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      category: file.category,
+    };
+    emitNewFile(global.io, roomId.toString(), fileData, userId.toString());
+  }
+
   res.status(200).json({
     message: "✅ File shared with room successfully",
     room: room,
@@ -1387,6 +1400,17 @@ exports.shareFolderWithRoom = asyncHandler(async (req, res, next) => {
       roomName: room.name,
     }
   );
+
+  // ✅ إرسال إشعار socket.io للمجلد المشترك
+  if (global.io) {
+    const folderData = {
+      _id: folder._id,
+      name: folder.name,
+      size: folder.size,
+      filesCount: folder.filesCount,
+    };
+    emitNewFolder(global.io, roomId.toString(), folderData, userId.toString());
+  }
 
   res.status(200).json({
     message: "✅ Folder shared with room successfully",
@@ -2880,6 +2904,20 @@ exports.shareFileWithRoomOneTime = asyncHandler(async (req, res, next) => {
       expiresInHours: hours,
     }
   );
+
+  // ✅ إرسال إشعار socket.io للملف المشترك (one-time)
+  if (global.io) {
+    const fileData = {
+      _id: file._id,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      category: file.category,
+      isOneTimeShare: true,
+      expiresAt: expiresAt,
+    };
+    emitNewFile(global.io, roomId.toString(), fileData, userId.toString());
+  }
 
   res.status(200).json({
     message: "✅ File shared with room (one-time access)",

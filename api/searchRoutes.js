@@ -24,6 +24,7 @@ router.get("/test", (req, res) => {
       "POST /api/v1/search/smart",
       "POST /api/v1/search/content",
       "POST /api/v1/search/filename",
+      "POST /api/v1/search/tags",
       "POST /api/v1/search/process/:fileId",
       "POST /api/v1/search/reprocess/:fileId",
       "GET /api/v1/search/hf-status",
@@ -179,6 +180,47 @@ router.post(
         category: r.item.category,
         size: r.item.size,
         createdAt: r.item.createdAt,
+      })),
+    });
+  })
+);
+
+// @desc    Search by tags - البحث عن طريق التاغ
+// @route   POST /api/v1/search/tags
+// @access  Private
+router.post(
+  "/tags",
+  protect,
+  asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+    const { tag, limit = 20 } = req.body;
+
+    if (!tag || tag.trim().length === 0) {
+      return res.status(400).json({
+        message: "Tag is required",
+      });
+    }
+
+    const results = await searchByTags(userId, tag.trim(), {
+      limit: parseInt(limit, 10),
+    });
+
+    res.status(200).json({
+      message: "Tag search completed successfully",
+      tag,
+      resultsCount: results.length,
+      results: results.map((r) => ({
+        type: r.type,
+        _id: r.item._id,
+        name: r.item.name,
+        category: r.item.category || null,
+        size: r.item.size || 0,
+        tags: r.item.tags || [],
+        description: r.item.description || "",
+        relevanceScore: Math.round(r.score * 100) / 100,
+        searchType: r.searchType,
+        createdAt: r.item.createdAt,
+        updatedAt: r.item.updatedAt,
       })),
     });
   })

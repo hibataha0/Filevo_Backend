@@ -750,6 +750,17 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
     parentFolder = parallelResults[!isOwner && !isSharedWith ? 1 : 0];
   }
 
+  // ✅ إذا كان المجلد مشاركاً في روم (المستخدم ليس صاحب المجلد)، استبعاد المجلدات المحمية من العد
+  let finalSubfoldersCount = subfoldersCount;
+  if (isSharedInRoom && !isOwner) {
+    const protectedSubfoldersCount = await Folder.countDocuments({
+      parentId: folderId,
+      isDeleted: false,
+      isProtected: true,
+    });
+    finalSubfoldersCount = subfoldersCount - protectedSubfoldersCount;
+  }
+
   // ✅ استخدام الحقول المحفوظة مباشرة بدلاً من الحساب recursive
   const totalSize = folder.size || 0;
   const totalFilesCount = folder.filesCount || 0;
@@ -786,9 +797,9 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
     isShared: folder.isShared,
     sharedWith: folder.sharedWith,
     sharedWithCount: folder.sharedWith.length,
-    subfoldersCount: subfoldersCount,
+    subfoldersCount: finalSubfoldersCount,
     filesCount: totalFilesCount, // ✅ عدد الملفات الكلي (recursive)
-    totalItems: subfoldersCount + directFilesCount, // ✅ العناصر المباشرة فقط
+    totalItems: finalSubfoldersCount + directFilesCount, // ✅ العناصر المباشرة فقط
     isStarred: folder.isStarred,
     createdAt: folder.createdAt,
     updatedAt: folder.updatedAt,
@@ -829,12 +840,32 @@ exports.getFolderContents = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Folder not found", 404));
   }
 
+  // ✅ التحقق إذا كان المستخدم هو صاحب المجلد
+  const isOwner = folder.userId.toString() === userId.toString();
+  
+  // ✅ التحقق إذا كان المجلد مشاركاً في روم
+  const Room = require("../models/roomModel");
+  let isSharedInRoom = false;
+  if (!isOwner) {
+    const room = await Room.findOne({
+      "folders.folderId": folderId,
+      "members.user": userId,
+      isActive: true,
+    }).lean();
+    isSharedInRoom = !!room;
+  }
+
   // ✅ جلب جميع subfolders و files (بدون pagination أولاً)
   // لا حاجة للتحقق من userId لأن المجلد قد يكون مشاركاً في روم
-  const allSubfolders = await Folder.find({
+  let allSubfolders = await Folder.find({
     parentId: folderId,
     isDeleted: false,
   }).sort({ createdAt: -1 });
+
+  // ✅ إذا كان المجلد مشاركاً في روم (وليس مشارك مباشر)، استبعاد المجلدات الفرعية المحمية
+  if (isSharedInRoom && !isOwner) {
+    allSubfolders = allSubfolders.filter((subfolder) => !subfolder.isProtected);
+  }
 
   const allFiles = await File.find({
     parentFolderId: folderId,
@@ -2044,10 +2075,18 @@ exports.getSharedFolderDetailsInRoom = asyncHandler(async (req, res, next) => {
   };
 
   // Get subfolders and files count
-  const subfoldersCount = await Folder.countDocuments({
+  const allSubfoldersCount = await Folder.countDocuments({
     parentId: folderId,
     isDeleted: false,
   });
+
+  // ✅ استبعاد المجلدات المحمية من العد (لأن المجلد مشارك في روم)
+  const protectedSubfoldersCount = await Folder.countDocuments({
+    parentId: folderId,
+    isDeleted: false,
+    isProtected: true,
+  });
+  const subfoldersCount = allSubfoldersCount - protectedSubfoldersCount;
 
   // ✅ حساب الحجم وعدد الملفات بشكل recursive
   const totalSize = await calculateFolderSizeRecursive(folderId);

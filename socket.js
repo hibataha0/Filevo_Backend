@@ -171,7 +171,55 @@ function emitNewComment(io, roomId, comment) {
   console.log(`📢 New comment emitted to room: ${roomId}`);
 }
 
+/**
+ * Emit new file shared to all members of a room
+ * @param {Server} io - Socket.IO server instance
+ * @param {string} roomId - Room ID
+ * @param {Object} file - File object
+ * @param {string} sharedBy - User ID who shared the file
+ */
+function emitNewFile(io, roomId, file, sharedBy) {
+  if (!io) {
+    console.warn("Socket.IO not initialized, cannot emit file");
+    return;
+  }
+
+  io.to(`room:${roomId}`).emit("new_file", {
+    file,
+    roomId,
+    sharedBy,
+    timestamp: new Date(),
+  });
+
+  console.log(`📁 New file emitted to room: ${roomId}`);
+}
+
+/**
+ * Emit new folder shared to all members of a room
+ * @param {Server} io - Socket.IO server instance
+ * @param {string} roomId - Room ID
+ * @param {Object} folder - Folder object
+ * @param {string} sharedBy - User ID who shared the folder
+ */
+function emitNewFolder(io, roomId, folder, sharedBy) {
+  if (!io) {
+    console.warn("Socket.IO not initialized, cannot emit folder");
+    return;
+  }
+
+  io.to(`room:${roomId}`).emit("new_folder", {
+    folder,
+    roomId,
+    sharedBy,
+    timestamp: new Date(),
+  });
+
+  console.log(`📂 New folder emitted to room: ${roomId}`);
+}
+
 module.exports = {
   initializeSocketIO,
   emitNewComment,
+  emitNewFile,
+  emitNewFolder,
 };
