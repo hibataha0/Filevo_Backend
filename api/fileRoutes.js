@@ -13,6 +13,7 @@ const {
   deleteFilePermanent,
   getTrashFiles,
   cleanExpiredFiles,
+  cleanOrphanedFiles,
   toggleStarFile,
   getStarredFiles,
   updateFile,
@@ -100,6 +101,9 @@ router.get("/shared-in-room/:id", protect, getSharedFileDetailsInRoom);
 
 // Clean expired files
 router.delete("/clean-expired", protect, cleanExpiredFiles);
+
+// Clean orphaned files (files on disk without DB record)
+router.delete("/clean-orphaned", protect, cleanOrphanedFiles);
 
 // Update all folder sizes
 router.put("/update-folder-sizes", protect, updateAllFolderSizes);

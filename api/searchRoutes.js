@@ -6,6 +6,7 @@ const {
   smartSearch,
   searchInFileContent,
   searchByFileName,
+  searchByTags,
 } = require("../services/aiSearchService");
 const {
   processFile,

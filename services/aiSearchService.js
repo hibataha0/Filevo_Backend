@@ -107,19 +107,19 @@ async function smartSearch(userId, query, options = {}) {
       $or: [
         { name: textSearchRegex },
         { description: textSearchRegex },
-        { tags: { $in: [textSearchRegex] } },
+        { tags: textSearchRegex }, // ✅ إصلاح: استخدام regex مباشرة على array
         { extractedText: textSearchRegex },
         // البحث في بيانات الصور
         { imageDescription: textSearchRegex },
         { imageScene: textSearchRegex },
-        { imageObjects: { $in: [textSearchRegex] } },
+        { imageObjects: textSearchRegex }, // ✅ إصلاح: استخدام regex مباشرة على array
         { imageText: textSearchRegex },
         // البحث في بيانات الصوت
         { audioTranscript: textSearchRegex },
         // البحث في بيانات الفيديو
         { videoTranscript: textSearchRegex },
         { videoDescription: textSearchRegex },
-        { videoScenes: { $in: [textSearchRegex] } },
+        { videoScenes: textSearchRegex }, // ✅ إصلاح: استخدام regex مباشرة على array
       ],
     };
 
@@ -342,10 +342,11 @@ async function searchByTags(userId, tagQuery, options = {}) {
     );
 
     // البحث في ملفات
+    // استخدام $regex للبحث في array من strings
     const files = await File.find({
       userId,
       isDeleted: false,
-      tags: { $in: [tagSearchRegex] },
+      tags: tagSearchRegex, // MongoDB يدعم regex مباشرة على array fields
     })
       .limit(limit)
       .lean();
@@ -354,7 +355,7 @@ async function searchByTags(userId, tagQuery, options = {}) {
     const folders = await Folder.find({
       userId,
       isDeleted: false,
-      tags: { $in: [tagSearchRegex] },
+      tags: tagSearchRegex, // MongoDB يدعم regex مباشرة على array fields
     })
       .limit(limit)
       .lean();

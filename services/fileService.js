@@ -294,6 +294,16 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
           }
         );
       } catch (error) {
+        // ✅ Cleanup: حذف الملف من القرص عند حدوث خطأ
+        if (file && file.path && fs.existsSync(file.path)) {
+          try {
+            fs.unlinkSync(file.path);
+            console.log(`🧹 Cleaned up orphaned file: ${file.path}`);
+          } catch (cleanupError) {
+            console.error(`❌ Error cleaning up file ${file.path}:`, cleanupError.message);
+          }
+        }
+
         errors.push({
           filename: file.originalname,
           error: error.message,
@@ -314,6 +324,24 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
       totalSize: uploadedFiles.reduce((sum, file) => sum + file.size, 0),
     });
   } catch (error) {
+    // ✅ Cleanup: حذف جميع الملفات المرفوعة جزئياً عند حدوث خطأ عام
+    if (files && Array.isArray(files)) {
+      for (const file of files) {
+        if (file && file.path && fs.existsSync(file.path)) {
+          try {
+            // تحقق أن الملف لم يُسجل في DB
+            const fileInDb = await File.findOne({ path: file.path });
+            if (!fileInDb) {
+              fs.unlinkSync(file.path);
+              console.log(`🧹 Cleaned up orphaned file: ${file.path}`);
+            }
+          } catch (cleanupError) {
+            console.error(`❌ Error cleaning up file ${file.path}:`, cleanupError.message);
+          }
+        }
+      }
+    }
+
     res.status(500).json({
       message: "Error uploading files",
       error: error.message,
@@ -425,11 +453,21 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
       file: newFile,
     });
   } catch (error) {
-    (console.log("Error uploading file:", error),
-      res.status(500).json({
-        message: "Error uploading file",
-        error: error.message,
-      }));
+    // ✅ Cleanup: حذف الملف من القرص عند حدوث خطأ
+    if (file && file.path && fs.existsSync(file.path)) {
+      try {
+        fs.unlinkSync(file.path);
+        console.log(`🧹 Cleaned up orphaned file: ${file.path}`);
+      } catch (cleanupError) {
+        console.error(`❌ Error cleaning up file ${file.path}:`, cleanupError.message);
+      }
+    }
+
+    console.log("Error uploading file:", error);
+    res.status(500).json({
+      message: "Error uploading file",
+      error: error.message,
+    });
   }
 });
 
@@ -2315,4 +2353,96 @@ exports.downloadFolder = asyncHandler(async (req, res, next) => {
       userAgent: req.get("User-Agent"),
     }
   );
+});
+
+// ✅ Helper function to clean orphaned files (files on disk without DB record)
+// This function can be called manually or by a cron job
+async function cleanOrphanedFiles(maxAgeHours = 1) {
+  const uploadsDir = "my_files";
+  if (!fs.existsSync(uploadsDir)) {
+    return { deletedCount: 0, errors: [] };
+  }
+
+  const errors = [];
+  const now = Date.now();
+  const maxAge = maxAgeHours * 60 * 60 * 1000; // Convert hours to milliseconds
+
+  try {
+    // Get all files from disk
+    const filesOnDisk = fs.readdirSync(uploadsDir);
+    
+    // Get all file paths from database
+    const filesInDb = await File.find({}).select("path").lean();
+    const dbPaths = new Set(filesInDb.map(f => f.path));
+
+    let deletedCount = 0;
+
+    // Check each file on disk
+    for (const filename of filesOnDisk) {
+      const filePath = path.join(uploadsDir, filename);
+      
+      try {
+        const stats = fs.statSync(filePath);
+        
+        // Skip if it's a directory
+        if (stats.isDirectory()) {
+          continue;
+        }
+
+        // Check if file is in database
+        const relativePath = filePath.replace(/\\/g, '/'); // Normalize path separators
+        const isInDb = dbPaths.has(relativePath) || dbPaths.has(filePath);
+
+        // Check file age
+        const fileAge = now - stats.mtimeMs;
+
+        // Delete if:
+        // 1. Not in database AND
+        // 2. Older than maxAgeHours
+        if (!isInDb && fileAge > maxAge) {
+          fs.unlinkSync(filePath);
+          deletedCount++;
+          console.log(`🧹 Cleaned up orphaned file: ${filePath} (age: ${Math.round(fileAge / 1000 / 60)} minutes)`);
+        }
+      } catch (fileError) {
+        errors.push({
+          filePath: filePath,
+          error: fileError.message,
+        });
+        console.error(`❌ Error processing file ${filePath}:`, fileError.message);
+      }
+    }
+
+    return {
+      deletedCount: deletedCount,
+      errors: errors,
+      message: `✅ Cleaned up ${deletedCount} orphaned file(s)`,
+    };
+  } catch (error) {
+    console.error("❌ Error in cleanOrphanedFiles:", error);
+    return {
+      deletedCount: 0,
+      errors: [{ error: error.message }],
+      message: `❌ Error cleaning orphaned files: ${error.message}`,
+    };
+  }
+}
+
+// ✅ Export direct function for cron job use (without asyncHandler wrapper)
+exports.cleanOrphanedFilesDirect = cleanOrphanedFiles;
+
+// @desc    Clean orphaned files (files on disk without DB record)
+// @route   DELETE /api/files/clean-orphaned
+// @access  Private
+exports.cleanOrphanedFiles = asyncHandler(async (req, res) => {
+  const maxAgeHours = parseInt(req.query.maxAgeHours) || 1; // Default: 1 hour
+
+  const result = await cleanOrphanedFiles(maxAgeHours);
+
+  res.status(200).json({
+    message: result.message,
+    deletedCount: result.deletedCount,
+    maxAgeHours: maxAgeHours,
+    errors: result.errors,
+  });
 });

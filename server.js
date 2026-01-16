@@ -22,6 +22,7 @@ const searchRoutes = require("./api/searchRoutes");
 const dbConnection = require("./config/database");
 const globalError = require("./middlewares/errMiddlewarel");
 const roomService = require("./services/roomService");
+const fileService = require("./services/fileService");
 const { checkHFConnection } = require("./services/aiService");
 const { initializeSocketIO } = require("./socket");
 
@@ -173,6 +174,52 @@ const scheduleInvitationCleanup = () => {
   );
 };
 
+// ✅ Schedule orphaned files cleanup (files on disk without DB record)
+const scheduleOrphanedFilesCleanup = () => {
+  // eslint-disable-next-line global-require
+  const mongoose = require("mongoose");
+
+  const runCleanup = () => {
+    if (mongoose.connection.readyState === 1) {
+      fileService
+        .cleanOrphanedFilesDirect(1) // Clean files older than 1 hour
+        .then((result) => {
+          if (result.deletedCount > 0) {
+            console.log(
+              `🧹 Orphaned files cleaned up on startup (${result.deletedCount} deleted)`
+            );
+          }
+        })
+        .catch((err) =>
+          console.error("Error cleaning orphaned files:", err.message)
+        );
+    } else setTimeout(runCleanup, 2000);
+  };
+
+  setTimeout(runCleanup, 5000); // Run 5 seconds after startup
+
+  // Run cleanup every 6 hours
+  setInterval(
+    () => {
+      if (mongoose.connection.readyState === 1) {
+        fileService
+          .cleanOrphanedFilesDirect(1) // Clean files older than 1 hour
+          .then((result) => {
+            if (result.deletedCount > 0) {
+              console.log(
+                `🧹 Orphaned files cleaned up (${result.deletedCount} deleted)`
+              );
+            }
+          })
+          .catch((err) =>
+            console.error("Error cleaning orphaned files:", err.message)
+          );
+      }
+    },
+    6 * 60 * 60 * 1000 // Every 6 hours
+  );
+};
+
 // ======================
 // 🚀 START SERVER
 // ======================
@@ -180,6 +227,7 @@ const PORT = process.env.PORT || 8000;
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`App running on port ${PORT}`);
   scheduleInvitationCleanup();
+  scheduleOrphanedFilesCleanup();
   checkHFOnStartup();
 });
 
