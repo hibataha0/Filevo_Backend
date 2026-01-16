@@ -29,6 +29,10 @@ const userSchema = new mongoose.Schema(
     passwordResetExpires: Date,
     passwordResetVerified: Boolean,
     lastPasswordResetEmail: String, // 🔹 نخزن فيه الإيميل مؤقتًا
+    // 📧 حقول التحقق من تغيير الإيميل
+    emailChangeCode: String, // كود التحقق من تغيير الإيميل
+    emailChangeExpires: Date, // تاريخ انتهاء كود التحقق
+    pendingEmail: String, // الإيميل الجديد المؤقت (قبل التحقق)
     profileImg: String, // صورة الملف الشخصي
     // 📦 إدارة المساحة التخزينية
     storageLimit: {

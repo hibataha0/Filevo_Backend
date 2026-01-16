@@ -195,3 +195,14 @@ exports.changeLoggedUserPasswordValidator = [
     }),
   validatorMiddleware,
 ];
+
+exports.verifyEmailChangeValidator = [
+  body('verificationCode')
+    .notEmpty()
+    .withMessage('يرجى إدخال كود التحقق')
+    .isLength({ min: 6, max: 6 })
+    .withMessage('كود التحقق يجب أن يكون 6 أرقام')
+    .isNumeric()
+    .withMessage('كود التحقق يجب أن يحتوي على أرقام فقط'),
+  validatorMiddleware,
+];

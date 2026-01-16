@@ -2,12 +2,14 @@ const express = require('express');
 const {
   updateLoggedUserValidator,
   changeLoggedUserPasswordValidator,
+  verifyEmailChangeValidator,
 } = require('../utils/validators/userValidator');
 
 const {
   getLoggedUserData,
   updateLoggedUserPassword,
   updateLoggedUserData,
+  verifyEmailChange,
   deleteLoggedUserData,
 } = require('../services/userService');
 
@@ -39,6 +41,7 @@ router.put(
   resizeProfileImage,
   updateLoggedUserData
 );
+router.post('/verifyEmailChange', verifyEmailChangeValidator, verifyEmailChange);
 router.delete('/deleteMe', deleteLoggedUserData);
 
 module.exports = router;
