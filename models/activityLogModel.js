@@ -86,9 +86,26 @@ const activityLogSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Index for better query performance
+// ======================
+// ✅ فهارس محسّنة لتحسين الأداء
+// ======================
+
+// 1. سجل نشاط المستخدم
 activityLogSchema.index({ userId: 1, createdAt: -1 });
+
+// 2. الاستعلامات حسب نوع الإجراء
 activityLogSchema.index({ action: 1, createdAt: -1 });
+
+// 3. البحث عن سجل نشاط كائن محدد
+activityLogSchema.index({ entityType: 1, entityId: 1, createdAt: -1 });
+
+// 4. عمليات التنظيف (حذف السجلات القديمة)
+activityLogSchema.index({ createdAt: 1 });
+
+// 5. الاستعلامات المعقدة (مستخدم + إجراء)
+activityLogSchema.index({ userId: 1, action: 1, createdAt: -1 });
+
+// 6. تتبع نشاط الكائن (بدون ترتيب)
 activityLogSchema.index({ entityType: 1, entityId: 1 });
 
 const ActivityLog = mongoose.model('ActivityLog', activityLogSchema);

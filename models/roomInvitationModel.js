@@ -45,8 +45,24 @@ const roomInvitationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Index to ensure one pending invitation per room-user pair
-roomInvitationSchema.index({ room: 1, receiver: 1, status: 1 });
+// ======================
+// ✅ فهارس محسّنة لتحسين الأداء
+// ======================
+
+// 1. منع الدعوات المكررة - دعوة واحدة معلقة لكل غرفة-مستخدم (unique)
+roomInvitationSchema.index({ room: 1, receiver: 1, status: 1 }, { unique: true, partialFilterExpression: { status: "pending" } });
+
+// 2. دعوات المستخدم
+roomInvitationSchema.index({ receiver: 1, status: 1, createdAt: -1 });
+
+// 3. دعوات الغرفة
+roomInvitationSchema.index({ room: 1, status: 1, createdAt: -1 });
+
+// 4. الدعوات المرسلة
+roomInvitationSchema.index({ sender: 1, status: 1, createdAt: -1 });
+
+// 5. عمليات التنظيف (حذف الدعوات القديمة)
+roomInvitationSchema.index({ status: 1, createdAt: 1 });
 
 const RoomInvitation = mongoose.model("RoomInvitation", roomInvitationSchema);
 module.exports = RoomInvitation;

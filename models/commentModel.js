@@ -32,7 +32,21 @@ const commentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// ======================
+// ✅ فهارس محسّنة لتحسين الأداء
+// ======================
+
+// 1. جميع التعليقات في الغرفة
+commentSchema.index({ room: 1, createdAt: -1 });
+
+// 2. التعليقات على كائن محدد (ملف/مجلد)
 commentSchema.index({ room: 1, targetType: 1, targetId: 1, createdAt: -1 });
+
+// 3. تعليقات المستخدم
+commentSchema.index({ user: 1, createdAt: -1 });
+
+// 4. البحث السريع في التعليقات
+commentSchema.index({ room: 1, targetType: 1, createdAt: -1 });
 
 const Comment = mongoose.model('Comment', commentSchema);
 module.exports = Comment;

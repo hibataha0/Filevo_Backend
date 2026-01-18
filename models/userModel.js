@@ -54,6 +54,22 @@ userSchema.pre("save", async function (next) {
   next();
 });
 
+// ======================
+// ✅ فهارس محسّنة لتحسين الأداء
+// ======================
+
+// 1. البحث عن المستخدم بالإيميل (موجود بالفعل كـ unique في Schema)
+// email field already has unique: true
+
+// 2. إعادة تعيين كلمة المرور
+userSchema.index({ passwordResetCode: 1, passwordResetExpires: 1 });
+
+// 3. تغيير الإيميل
+userSchema.index({ emailChangeCode: 1, emailChangeExpires: 1 });
+
+// 4. استعلامات المساحة التخزينية
+userSchema.index({ usedStorage: 1 });
+
 // 3 - Create model
 const User = mongoose.model("User", userSchema);
 

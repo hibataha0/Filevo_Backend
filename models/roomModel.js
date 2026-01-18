@@ -107,12 +107,33 @@ const roomSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Add indexes for better performance
-roomSchema.index({ "members.user": 1, isActive: 1 });
-roomSchema.index({ owner: 1 });
-roomSchema.index({ createdAt: -1 });
-// ✅ Index لتحسين query البحث عن المجلدات في الـ rooms
+// ======================
+// ✅ فهارس محسّنة لتحسين الأداء
+// ======================
+
+// 1. غرف المستخدم - الغرف التي ينتمي إليها المستخدم
+roomSchema.index({ "members.user": 1, isActive: 1, createdAt: -1 });
+
+// 2. غرف المستخدم كمالك
+roomSchema.index({ owner: 1, isActive: 1 });
+
+// 3. البحث عن الملفات في الغرف
+roomSchema.index({ "files.fileId": 1, isActive: 1 });
+
+// 4. البحث عن المجلدات في الغرف
 roomSchema.index({ "folders.folderId": 1, "members.user": 1, isActive: 1 });
+
+// 5. الغرف النشطة
+roomSchema.index({ isActive: 1, createdAt: -1 });
+
+// 6. Text Index للبحث في أسماء ووصف الغرف
+roomSchema.index({ name: "text", description: "text" });
+
+// 7. تتبع الوصول للملفات
+roomSchema.index({ "files.fileId": 1, "files.accessedBy.user": 1 });
+
+// 8. انتهاء صلاحية المشاركة لمرة واحدة
+roomSchema.index({ "files.expiresAt": 1, "files.isOneTimeShare": 1 });
 
 const Room = mongoose.model("Room", roomSchema);
 module.exports = Room;

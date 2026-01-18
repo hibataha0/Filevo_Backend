@@ -66,12 +66,36 @@ const folderSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ✅ Indexes لتحسين الأداء
+// ======================
+// ✅ فهارس محسّنة لتحسين الأداء
+// ======================
+
+// 1. getAllFolders - جميع المجلدات
 folderSchema.index({ userId: 1, isDeleted: 1, createdAt: -1 });
-folderSchema.index({ parentId: 1, isDeleted: 1 });
-folderSchema.index({ userId: 1, isDeleted: 1 });
-// ✅ Index محسّن للـ getFolderContents - DB-level pagination
+
+// 2. getFolderContents - محتويات المجلد مع pagination (DB-level pagination)
 folderSchema.index({ parentId: 1, isDeleted: 1, createdAt: -1 });
+
+// 3. البحث السريع عن المجلدات الفرعية
+folderSchema.index({ userId: 1, isDeleted: 1, parentId: 1 });
+
+// 4. getStarredFolders - المجلدات المميزة
+folderSchema.index({ userId: 1, isDeleted: 1, isStarred: 1, createdAt: -1 });
+
+// 5. getFoldersSharedWithMe - المجلدات المشتركة
+folderSchema.index({ userId: 1, isDeleted: 1, "sharedWith.user": 1, createdAt: -1 });
+
+// 6. المجلدات المحمية
+folderSchema.index({ userId: 1, isDeleted: 1, isProtected: 1 });
+
+// 7. البحث بالمسار
+folderSchema.index({ userId: 1, path: 1 });
+
+// 8. getTrashFolders - المجلدات المحذوفة
+folderSchema.index({ userId: 1, isDeleted: 1, deletedAt: -1 });
+
+// 9. عمليات التنظيف - حذف المجلدات المنتهية الصلاحية
+folderSchema.index({ isDeleted: 1, deleteExpiryDate: 1 });
 
 // ✅ Pre-save hook للتأكد من الاتساق
 folderSchema.pre("save", function (next) {

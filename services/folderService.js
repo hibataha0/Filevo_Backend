@@ -631,10 +631,12 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
   const User = require("../models/userModel");
 
   // ✅ تشغيل folder query و count queries بشكل متوازي
+  // ✅ استخدام req.folder من checkFolderAccess middleware (يحتوي على معلومات الحماية)
+  const folderFromMiddleware = req.folder;
   const [folderDoc, subfoldersCount, directFilesCount] = await Promise.all([
     Folder.findById(folderId)
       .select(
-        "name path size filesCount description tags isShared isStarred parentId userId sharedWith createdAt updatedAt"
+        "name path size filesCount description tags isShared isStarred parentId userId sharedWith createdAt updatedAt isProtected protectionType"
       )
       .populate("userId", "name email")
       .populate("sharedWith.user", "name email"),
@@ -750,16 +752,8 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
     parentFolder = parallelResults[!isOwner && !isSharedWith ? 1 : 0];
   }
 
-  // ✅ إذا كان المجلد مشاركاً في روم (المستخدم ليس صاحب المجلد)، استبعاد المجلدات المحمية من العد
-  let finalSubfoldersCount = subfoldersCount;
-  if (isSharedInRoom && !isOwner) {
-    const protectedSubfoldersCount = await Folder.countDocuments({
-      parentId: folderId,
-      isDeleted: false,
-      isProtected: true,
-    });
-    finalSubfoldersCount = subfoldersCount - protectedSubfoldersCount;
-  }
+  // ✅ نعرض جميع المجلدات الفرعية بما فيها المحمية (يتم طلب كلمة السر عند فتحها)
+  const finalSubfoldersCount = subfoldersCount;
 
   // ✅ استخدام الحقول المحفوظة مباشرة بدلاً من الحساب recursive
   const totalSize = folder.size || 0;
@@ -801,6 +795,8 @@ exports.getFolderDetails = asyncHandler(async (req, res, next) => {
     filesCount: totalFilesCount, // ✅ عدد الملفات الكلي (recursive)
     totalItems: finalSubfoldersCount + directFilesCount, // ✅ العناصر المباشرة فقط
     isStarred: folder.isStarred,
+    isProtected: folder.isProtected || false, // ✅ إضافة معلومات الحماية
+    protectionType: folder.protectionType || "none", // ✅ إضافة نوع الحماية
     createdAt: folder.createdAt,
     updatedAt: folder.updatedAt,
     lastModified: folder.updatedAt,
@@ -857,15 +853,11 @@ exports.getFolderContents = asyncHandler(async (req, res, next) => {
 
   // ✅ جلب جميع subfolders و files (بدون pagination أولاً)
   // لا حاجة للتحقق من userId لأن المجلد قد يكون مشاركاً في روم
+  // ✅ نعرض جميع المجلدات الفرعية بما فيها المحمية (يتم طلب كلمة السر عند فتحها)
   let allSubfolders = await Folder.find({
     parentId: folderId,
     isDeleted: false,
   }).sort({ createdAt: -1 });
-
-  // ✅ إذا كان المجلد مشاركاً في روم (وليس مشارك مباشر)، استبعاد المجلدات الفرعية المحمية
-  if (isSharedInRoom && !isOwner) {
-    allSubfolders = allSubfolders.filter((subfolder) => !subfolder.isProtected);
-  }
 
   const allFiles = await File.find({
     parentFolderId: folderId,
@@ -2075,18 +2067,11 @@ exports.getSharedFolderDetailsInRoom = asyncHandler(async (req, res, next) => {
   };
 
   // Get subfolders and files count
-  const allSubfoldersCount = await Folder.countDocuments({
+  // ✅ نعرض جميع المجلدات الفرعية بما فيها المحمية (يتم طلب كلمة السر عند فتحها)
+  const subfoldersCount = await Folder.countDocuments({
     parentId: folderId,
     isDeleted: false,
   });
-
-  // ✅ استبعاد المجلدات المحمية من العد (لأن المجلد مشارك في روم)
-  const protectedSubfoldersCount = await Folder.countDocuments({
-    parentId: folderId,
-    isDeleted: false,
-    isProtected: true,
-  });
-  const subfoldersCount = allSubfoldersCount - protectedSubfoldersCount;
 
   // ✅ حساب الحجم وعدد الملفات بشكل recursive
   const totalSize = await calculateFolderSizeRecursive(folderId);
@@ -2139,6 +2124,7 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
   const userId = req.user._id;
 
   // Find folder including passwordHash for verification
+  // ✅ جلب جميع الحقول بما فيها isProtected و protectionType
   const folder = await Folder.findById(folderId).select("+passwordHash");
 
   if (!folder) {
@@ -2184,7 +2170,8 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
 
   // If folder is protected and user is not the owner, require verification
   // Owners can access their own protected folders without verification
-  if (folder.isProtected && !isOwner) {
+  // ✅ التحقق من أن المجلد محمي بشكل صحيح (يجب أن يكون true)
+  if (folder.isProtected === true && !isOwner) {
     // In a full implementation, you'd check for a session token or temporary access grant here
     // For now, we'll require shared users to verify access through the verifyFolderAccess endpoint
     // This can be improved with session-based access tokens
