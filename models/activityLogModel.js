@@ -26,6 +26,7 @@ const activityLogSchema = new mongoose.Schema(
         'file_viewed',
         'file_accessed_onetime',
         'file_viewed_by_all_members',
+        'file_downloaded_from_room',
         
         // Folder operations
         'folder_created',

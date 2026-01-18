@@ -6,32 +6,76 @@ const User = require('../models/userModel');
 const ApiError = require("../utils/apiError");
 const { transformUserProfileImage } = require('../utils/profileImageHelper');
 const sendEmail = require('../utils/sendEmail');
+const { userCache } = require('../utils/cache');
+
+// ✅ Promise cache لمنع الطلبات المتزامنة (race condition)
+const pendingUserRequests = new Map();
+
+// ✅ Helper function لمسح كاش المستخدم
+const clearUserCache = (userId) => {
+  const cacheKey = `user:${userId.toString()}`;
+  userCache.delete(cacheKey);
+  pendingUserRequests.delete(userId.toString());
+};
 
 // @desc    Get Logged user data
 // @route   GET /api/v1/users/getMe
 // @access  Private
 exports.getLoggedUserData = asyncHandler(async (req, res, next) => {
   try {
-    console.log('📥 [userService] getLoggedUserData - Fetching user:', req.user._id);
+    const userId = req.user._id.toString();
+    const cacheKey = `user:${userId}`;
     
-    const user = await User.findById(req.user._id);
-    if (!user) {
-      console.warn('⚠️ [userService] getLoggedUserData - User not found:', req.user._id);
-      return res.status(404).json({ message: 'User not found' });
+    // ✅ التحقق من الكاش أولاً
+    const cachedUser = userCache.get(cacheKey);
+    if (cachedUser) {
+      console.log('⚡ [userService] getLoggedUserData - Returned from cache:', userId);
+      return res.status(200).json({ data: cachedUser });
     }
     
-    // ✅ تحويل profileImg إلى URL كامل
-    let userWithProfileUrl;
-    try {
-      userWithProfileUrl = transformUserProfileImage(user, req);
-      console.log('✅ [userService] getLoggedUserData - User data transformed successfully');
-    } catch (transformError) {
-      console.error('❌ [userService] getLoggedUserData - Error transforming profile image:', transformError.message);
-      console.error('Stack trace:', transformError.stack);
-      // Fallback: return user without transformation
-      userWithProfileUrl = user.toObject ? user.toObject() : user;
+    // ✅ التحقق من وجود طلب قيد التنفيذ (منع race condition)
+    if (pendingUserRequests.has(userId)) {
+      console.log('⏳ [userService] getLoggedUserData - Waiting for pending request:', userId);
+      const userWithProfileUrl = await pendingUserRequests.get(userId);
+      return res.status(200).json({ data: userWithProfileUrl });
     }
     
+    // ✅ إنشاء Promise وحفظه
+    console.log('📥 [userService] getLoggedUserData - Fetching user from DB:', req.user._id);
+    
+    const fetchUserPromise = (async () => {
+      try {
+        const user = await User.findById(req.user._id);
+        if (!user) {
+          console.warn('⚠️ [userService] getLoggedUserData - User not found:', req.user._id);
+          throw new Error('User not found');
+        }
+        
+        // ✅ تحويل profileImg إلى URL كامل
+        let userWithProfileUrl;
+        try {
+          userWithProfileUrl = transformUserProfileImage(user, req);
+          console.log('✅ [userService] getLoggedUserData - User data transformed successfully');
+        } catch (transformError) {
+          console.error('❌ [userService] getLoggedUserData - Error transforming profile image:', transformError.message);
+          // Fallback: return user without transformation
+          userWithProfileUrl = user.toObject ? user.toObject() : user;
+        }
+        
+        // ✅ حفظ في الكاش لمدة دقيقة واحدة (60 ثانية)
+        userCache.set(cacheKey, userWithProfileUrl, 60 * 1000);
+        
+        return userWithProfileUrl;
+      } finally {
+        // ✅ حذف الـ pending request بعد الانتهاء
+        pendingUserRequests.delete(userId);
+      }
+    })();
+    
+    // ✅ حفظ الـ Promise
+    pendingUserRequests.set(userId, fetchUserPromise);
+    
+    const userWithProfileUrl = await fetchUserPromise;
     res.status(200).json({ data: userWithProfileUrl });
   } catch (error) {
     console.error('❌ [userService] getLoggedUserData - Unexpected error:', error.message);
@@ -60,6 +104,9 @@ exports.updateLoggedUserPassword = asyncHandler(async (req, res, next) => {
   user.password = await bcrypt.hash(req.body.password, 12);
   user.passwordChangedAt = Date.now();
   await user.save();
+
+  // ✅ مسح الكاش بعد تحديث البيانات
+  clearUserCache(user._id);
 
   // ✅ تحويل profileImg إلى URL كامل
   let userWithProfileUrl;
@@ -165,6 +212,9 @@ exports.updateLoggedUserData = asyncHandler(async (req, res, next) => {
     return next(new ApiError('User not found', 404));
   }
 
+  // ✅ مسح الكاش بعد تحديث البيانات
+  clearUserCache(updatedUser._id);
+
   // ✅ تحويل profileImg إلى URL كامل
   let userWithProfileUrl;
   try {
@@ -227,6 +277,9 @@ exports.verifyEmailChange = asyncHandler(async (req, res, next) => {
   user.emailChangeExpires = undefined;
 
   await user.save();
+
+  // ✅ مسح الكاش بعد تحديث البيانات
+  clearUserCache(user._id);
 
   // ✅ تحويل profileImg إلى URL كامل
   let userWithProfileUrl;

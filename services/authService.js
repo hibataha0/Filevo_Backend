@@ -41,7 +41,61 @@ exports.login = asyncHandler(async (req, res, next) => {
 
   // Delete password from response
   delete user._doc.password;
-  // 4) send response to client side
+
+  // ✅ 4) إرسال إيميل تنبيه أمني بعد نجاح تسجيل الدخول
+  try {
+    const loginTime = new Date().toLocaleString('ar-EG', { 
+      timeZone: 'Asia/Riyadh',
+      dateStyle: 'full',
+      timeStyle: 'short'
+    });
+    
+    const ipAddress = req.ip || req.connection.remoteAddress || 'غير معروف';
+    const userAgent = req.headers['user-agent'] || 'غير معروف';
+    
+    // تحديد نوع الجهاز والمتصفح
+    let deviceType = 'غير معروف';
+    let browser = 'غير معروف';
+    
+    if (userAgent.includes('Mobile') || userAgent.includes('Android') || userAgent.includes('iPhone')) {
+      deviceType = 'هاتف محمول';
+    } else if (userAgent.includes('Tablet') || userAgent.includes('iPad')) {
+      deviceType = 'تابلت';
+    } else {
+      deviceType = 'كمبيوتر';
+    }
+    
+    if (userAgent.includes('Chrome')) browser = 'Chrome';
+    else if (userAgent.includes('Firefox')) browser = 'Firefox';
+    else if (userAgent.includes('Safari')) browser = 'Safari';
+    else if (userAgent.includes('Edge')) browser = 'Edge';
+    
+    const message = `مرحباً ${user.name}،
+
+تم تسجيل الدخول إلى حسابك على Filevo بنجاح.
+
+📅 التاريخ والوقت: ${loginTime}
+🌐 عنوان IP: ${ipAddress}
+💻 الجهاز: ${deviceType}
+🔍 المتصفح: ${browser}
+
+إذا لم تكن أنت من قام بهذا الإجراء، يرجى تغيير كلمة المرور فوراً وتأمين حسابك.
+
+مع تحيات فريق Filevo`;
+
+    await sendEmail({
+      email: user.email,
+      subject: "🔔 تنبيه أمني: تم تسجيل الدخول إلى حسابك",
+      message,
+    });
+    
+    console.log(`✅ [authService] Login notification email sent to ${user.email}`);
+  } catch (emailError) {
+    // لا نوقف تسجيل الدخول إذا فشل إرسال الإيميل
+    console.error(`⚠️ [authService] Failed to send login notification email: ${emailError.message}`);
+  }
+
+  // 5) send response to client side
   res.status(200).json({ data: user, token });
 });
 
