@@ -26,10 +26,19 @@ exports.getLoggedUserData = asyncHandler(async (req, res, next) => {
     const userId = req.user._id.toString();
     const cacheKey = `user:${userId}`;
     
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔍 [userService] getLoggedUserData - NEW REQUEST');
+    console.log('🔍 Request userId from token:', userId);
+    console.log('🔍 Request user name from token:', req.user.name);
+    console.log('🔍 Cache key:', cacheKey);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
     // ✅ التحقق من الكاش أولاً
     const cachedUser = userCache.get(cacheKey);
     if (cachedUser) {
-      console.log('⚡ [userService] getLoggedUserData - Returned from cache:', userId);
+      console.log('⚡ [userService] getLoggedUserData - Returned from cache');
+      console.log('⚡ [userService] getLoggedUserData - Cached user ID:', cachedUser._id);
+      console.log('⚡ [userService] getLoggedUserData - Cached user name:', cachedUser.name);
       return res.status(200).json({ data: cachedUser });
     }
     
@@ -62,8 +71,8 @@ exports.getLoggedUserData = asyncHandler(async (req, res, next) => {
           userWithProfileUrl = user.toObject ? user.toObject() : user;
         }
         
-        // ✅ حفظ في الكاش لمدة دقيقة واحدة (60 ثانية)
-        userCache.set(cacheKey, userWithProfileUrl, 60 * 1000);
+        // ✅ حفظ في الكاش لمدة 5 ثواني فقط (للتجربة والتأكد من عدم وجود مشاكل)
+        userCache.set(cacheKey, userWithProfileUrl, 5 * 1000);
         
         return userWithProfileUrl;
       } finally {
@@ -76,6 +85,11 @@ exports.getLoggedUserData = asyncHandler(async (req, res, next) => {
     pendingUserRequests.set(userId, fetchUserPromise);
     
     const userWithProfileUrl = await fetchUserPromise;
+    
+    console.log('✅ [userService] getLoggedUserData - Sending response for userId:', userId);
+    console.log('✅ [userService] getLoggedUserData - Response user ID:', userWithProfileUrl._id);
+    console.log('✅ [userService] getLoggedUserData - Response user name:', userWithProfileUrl.name);
+    
     res.status(200).json({ data: userWithProfileUrl });
   } catch (error) {
     console.error('❌ [userService] getLoggedUserData - Unexpected error:', error.message);

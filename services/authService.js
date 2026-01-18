@@ -133,6 +133,7 @@ exports.protect = asyncHandler(async (req, res, next) => {
   }
 
   // 3) Check if user exists
+  console.log('🔐 [authService.protect] Decoded token userId:', decoded.userId);
   const currentUser = await User.findById(decoded.userId);
   if (!currentUser) {
     return next(
@@ -142,6 +143,9 @@ exports.protect = asyncHandler(async (req, res, next) => {
       )
     );
   }
+  console.log('✅ [authService.protect] Found user:', currentUser._id.toString());
+  console.log('   User name:', currentUser.name);
+  console.log('   User email:', currentUser.email);
 
   // 4) Check if user change his password after token created
   if (currentUser.passwordChangedAt) {
