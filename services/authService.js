@@ -44,32 +44,36 @@ exports.login = asyncHandler(async (req, res, next) => {
 
   // ✅ 4) إرسال إيميل تنبيه أمني بعد نجاح تسجيل الدخول
   try {
-    const loginTime = new Date().toLocaleString('ar-EG', { 
-      timeZone: 'Asia/Riyadh',
-      dateStyle: 'full',
-      timeStyle: 'short'
+    const loginTime = new Date().toLocaleString("ar-EG", {
+      timeZone: "Asia/Riyadh",
+      dateStyle: "full",
+      timeStyle: "short",
     });
-    
-    const ipAddress = req.ip || req.connection.remoteAddress || 'غير معروف';
-    const userAgent = req.headers['user-agent'] || 'غير معروف';
-    
+
+    const ipAddress = req.ip || req.connection.remoteAddress || "غير معروف";
+    const userAgent = req.headers["user-agent"] || "غير معروف";
+
     // تحديد نوع الجهاز والمتصفح
-    let deviceType = 'غير معروف';
-    let browser = 'غير معروف';
-    
-    if (userAgent.includes('Mobile') || userAgent.includes('Android') || userAgent.includes('iPhone')) {
-      deviceType = 'هاتف محمول';
-    } else if (userAgent.includes('Tablet') || userAgent.includes('iPad')) {
-      deviceType = 'تابلت';
+    let deviceType = "غير معروف";
+    let browser = "غير معروف";
+
+    if (
+      userAgent.includes("Mobile") ||
+      userAgent.includes("Android") ||
+      userAgent.includes("iPhone")
+    ) {
+      deviceType = "هاتف محمول";
+    } else if (userAgent.includes("Tablet") || userAgent.includes("iPad")) {
+      deviceType = "تابلت";
     } else {
-      deviceType = 'كمبيوتر';
+      deviceType = "كمبيوتر";
     }
-    
-    if (userAgent.includes('Chrome')) browser = 'Chrome';
-    else if (userAgent.includes('Firefox')) browser = 'Firefox';
-    else if (userAgent.includes('Safari')) browser = 'Safari';
-    else if (userAgent.includes('Edge')) browser = 'Edge';
-    
+
+    if (userAgent.includes("Chrome")) browser = "Chrome";
+    else if (userAgent.includes("Firefox")) browser = "Firefox";
+    else if (userAgent.includes("Safari")) browser = "Safari";
+    else if (userAgent.includes("Edge")) browser = "Edge";
+
     const message = `مرحباً ${user.name}،
 
 تم تسجيل الدخول إلى حسابك على Filevo بنجاح.
@@ -88,11 +92,15 @@ exports.login = asyncHandler(async (req, res, next) => {
       subject: "🔔 تنبيه أمني: تم تسجيل الدخول إلى حسابك",
       message,
     });
-    
-    console.log(`✅ [authService] Login notification email sent to ${user.email}`);
+
+    console.log(
+      `✅ [authService] Login notification email sent to ${user.email}`,
+    );
   } catch (emailError) {
     // لا نوقف تسجيل الدخول إذا فشل إرسال الإيميل
-    console.error(`⚠️ [authService] Failed to send login notification email: ${emailError.message}`);
+    console.error(
+      `⚠️ [authService] Failed to send login notification email: ${emailError.message}`,
+    );
   }
 
   // 5) send response to client side
@@ -113,8 +121,8 @@ exports.protect = asyncHandler(async (req, res, next) => {
     return next(
       new ApiError(
         "You are not login, Please login to get access this route",
-        401
-      )
+        401,
+      ),
     );
   }
 
@@ -138,8 +146,8 @@ exports.protect = asyncHandler(async (req, res, next) => {
     return next(
       new ApiError(
         "The user that belong to this token does no longer exist",
-        401
-      )
+        401,
+      ),
     );
   }
 
@@ -147,15 +155,15 @@ exports.protect = asyncHandler(async (req, res, next) => {
   if (currentUser.passwordChangedAt) {
     const passChangedTimestamp = parseInt(
       currentUser.passwordChangedAt.getTime() / 1000,
-      10
+      10,
     );
     // Password changed after token created (Error)
     if (passChangedTimestamp > decoded.iat) {
       return next(
         new ApiError(
           "User recently changed his password. please login again..",
-          401
-        )
+          401,
+        ),
       );
     }
   }
@@ -172,7 +180,7 @@ exports.forgotPassword = asyncHandler(async (req, res, next) => {
   const user = await User.findOne({ email: req.body.email });
   if (!user) {
     return next(
-      new ApiError(`There is no user with that email ${req.body.email}`, 404)
+      new ApiError(`There is no user with that email ${req.body.email}`, 404),
     );
   }
   // 2) If user exist, Generate hash reset random 6 digits and save it in db
@@ -251,7 +259,7 @@ exports.resetPassword = asyncHandler(async (req, res, next) => {
   const user = await User.findOne({ email: req.body.email });
   if (!user) {
     return next(
-      new ApiError(`There is no user with email ${req.body.email}`, 404)
+      new ApiError(`There is no user with email ${req.body.email}`, 404),
     );
   }
 
@@ -263,7 +271,7 @@ exports.resetPassword = asyncHandler(async (req, res, next) => {
   // 3) Check if newPassword and confirmPassword match
   if (!newPassword || !confirmPassword || newPassword !== confirmPassword) {
     return next(
-      new ApiError("New password and confirm password do not match", 400)
+      new ApiError("New password and confirm password do not match", 400),
     );
   }
 
@@ -279,4 +287,15 @@ exports.resetPassword = asyncHandler(async (req, res, next) => {
   // 5) Generate token and send response
   const token = createToken(user._id);
   res.status(200).json({ token });
+});
+
+// @desc    Logout user
+// @route   POST /api/v1/auth/logout
+// @access  Protected
+exports.logout = asyncHandler(async (req, res, next) => {
+  // JWT stateless → logout يتم من جهة العميل
+  return res.status(200).json({
+    success: true,
+    message: "Logged out successfully",
+  });
 });

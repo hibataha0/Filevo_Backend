@@ -1,8 +1,8 @@
-const express = require('express');
+const express = require("express");
 const {
   signupValidator,
   loginValidator,
-} = require('../utils/validators/authValidator');
+} = require("../utils/validators/authValidator");
 
 const {
   registerUser,
@@ -10,19 +10,24 @@ const {
   forgotPassword,
   verifyPassResetCode,
   resetPassword,
-} = require('../services/authService');
+  logout, // ✅ 1) أضفنا logout
+  protect, // ✅ 2) أضفنا protect
+} = require("../services/authService");
 
 const router = express.Router();
 
 // 🔹 Signup route
-router.post('/registerUser', signupValidator, registerUser);
+router.post("/registerUser", signupValidator, registerUser);
 
 // 🔹 Login route
-router.post('/login', loginValidator, login);
+router.post("/login", loginValidator, login);
+
+// 🔹 Logout route ✅ (هنا الإضافة)
+router.post("/logout", protect, logout);
 
 // 🔹 Password reset routes
-router.post('/forgotPassword', forgotPassword);
-router.post('/verifyResetCode', verifyPassResetCode);
-router.put('/resetPassword', resetPassword);
+router.post("/forgotPassword", forgotPassword);
+router.post("/verifyResetCode", verifyPassResetCode);
+router.put("/resetPassword", resetPassword);
 
 module.exports = router;
