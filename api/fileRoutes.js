@@ -58,7 +58,7 @@ router.post(
   "/upload-single",
   protect,
   uploadSingleFileMiddleware,
-  uploadSingleFile
+  uploadSingleFile,
 );
 
 // Upload multiple files
@@ -66,7 +66,7 @@ router.post(
   "/upload-multiple",
   protect,
   uploadMultipleFilesMiddleware,
-  uploadMultipleFiles
+  uploadMultipleFiles,
 );
 
 // Get all files for user

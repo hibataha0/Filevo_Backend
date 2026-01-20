@@ -84,7 +84,7 @@ async function checkStorageSpace(userId, fileSize) {
 
     throw new ApiError(
       `مساحة التخزين غير كافية. المساحة المتاحة: ${formatBytes(availableSpace)}، حجم الملف: ${formatBytes(fileSize)}. يرجى شراء مساحة إضافية أو حذف بعض الملفات.`,
-      400
+      400,
     );
   }
 
@@ -232,14 +232,14 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
 
         const category = getCategoryByExtension(
           file.originalname,
-          file.mimetype
+          file.mimetype,
         );
 
         // Generate unique file name
         const uniqueFileName = await generateUniqueFileName(
           file.originalname,
           parentFolderId,
-          userId
+          userId,
         );
 
         const newFile = await File.create({
@@ -261,13 +261,13 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
         processFile(newFile._id)
           .then(() => {
             console.log(
-              `✅ Background processing completed for file: ${newFile.name}`
+              `✅ Background processing completed for file: ${newFile.name}`,
             );
           })
           .catch((err) => {
             console.error(
               `❌ Background processing error for file ${newFile.name} (${newFile._id}):`,
-              err.message
+              err.message,
             );
             console.error("Full error:", err);
           });
@@ -291,7 +291,7 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
           {
             ipAddress: req.ip,
             userAgent: req.get("User-Agent"),
-          }
+          },
         );
       } catch (error) {
         // ✅ Cleanup: حذف الملف من القرص عند حدوث خطأ
@@ -300,7 +300,10 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
             fs.unlinkSync(file.path);
             console.log(`🧹 Cleaned up orphaned file: ${file.path}`);
           } catch (cleanupError) {
-            console.error(`❌ Error cleaning up file ${file.path}:`, cleanupError.message);
+            console.error(
+              `❌ Error cleaning up file ${file.path}:`,
+              cleanupError.message,
+            );
           }
         }
 
@@ -336,7 +339,10 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
               console.log(`🧹 Cleaned up orphaned file: ${file.path}`);
             }
           } catch (cleanupError) {
-            console.error(`❌ Error cleaning up file ${file.path}:`, cleanupError.message);
+            console.error(
+              `❌ Error cleaning up file ${file.path}:`,
+              cleanupError.message,
+            );
           }
         }
       }
@@ -390,7 +396,7 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
     const uniqueFileName = await generateUniqueFileName(
       file.originalname,
       parentFolderId,
-      userId
+      userId,
     );
 
     const newFile = await File.create({
@@ -412,13 +418,13 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
     processFile(newFile._id)
       .then(() => {
         console.log(
-          `✅ Background processing completed for file: ${newFile.name}`
+          `✅ Background processing completed for file: ${newFile.name}`,
         );
       })
       .catch((err) => {
         console.error(
           `❌ Background processing error for file ${newFile.name}:`,
-          err.message
+          err.message,
         );
         console.error("Full error:", err);
       });
@@ -440,7 +446,7 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
       {
         ipAddress: req.ip,
         userAgent: req.get("User-Agent"),
-      }
+      },
     );
 
     // Update parent folder size if uploading to a specific folder
@@ -459,7 +465,10 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
         fs.unlinkSync(file.path);
         console.log(`🧹 Cleaned up orphaned file: ${file.path}`);
       } catch (cleanupError) {
-        console.error(`❌ Error cleaning up file ${file.path}:`, cleanupError.message);
+        console.error(
+          `❌ Error cleaning up file ${file.path}:`,
+          cleanupError.message,
+        );
       }
     }
 
@@ -707,7 +716,7 @@ exports.getRecentFiles = asyncHandler(async (req, res) => {
 
     const ancestors = [folderId];
     const folder = allFolders.find(
-      (f) => f._id.toString() === folderId.toString()
+      (f) => f._id.toString() === folderId.toString(),
     );
 
     if (folder && folder.parentId) {
@@ -727,7 +736,7 @@ exports.getRecentFiles = asyncHandler(async (req, res) => {
   // ✅ Get all files
   const allFiles = await File.find({ userId, isDeleted: false })
     .select(
-      "name type size path category parentFolderId isStarred createdAt updatedAt"
+      "name type size path category parentFolderId isStarred createdAt updatedAt",
     )
     .sort({ createdAt: -1 })
     .lean();
@@ -743,8 +752,8 @@ exports.getRecentFiles = asyncHandler(async (req, res) => {
       const ancestors = getAllAncestors(file.parentFolderId);
       const isInsideProtectedFolder = ancestors.some((ancestorId) =>
         protectedFolderIds.some(
-          (pid) => pid.toString() === ancestorId.toString()
-        )
+          (pid) => pid.toString() === ancestorId.toString(),
+        ),
       );
 
       if (!isInsideProtectedFolder) {
@@ -856,7 +865,7 @@ exports.deleteFile = asyncHandler(async (req, res) => {
   if (roomsWithFile.length > 0) {
     await Room.updateMany(
       { "files.fileId": fileId },
-      { $pull: { files: { fileId: fileId } } }
+      { $pull: { files: { fileId: fileId } } },
     );
 
     // Log activity for each room
@@ -872,7 +881,7 @@ exports.deleteFile = asyncHandler(async (req, res) => {
           roomId: room._id,
           roomName: room.name,
           reason: "File deleted by owner",
-        }
+        },
       );
     }
   }
@@ -894,7 +903,7 @@ exports.deleteFile = asyncHandler(async (req, res) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 
   res.status(200).json({
@@ -955,7 +964,7 @@ exports.restoreFile = asyncHandler(async (req, res) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 
   res.status(200).json({
@@ -997,7 +1006,7 @@ exports.deleteFilePermanent = asyncHandler(async (req, res) => {
   if (roomsWithFile.length > 0) {
     await Room.updateMany(
       { "files.fileId": fileId },
-      { $pull: { files: { fileId: fileId } } }
+      { $pull: { files: { fileId: fileId } } },
     );
 
     // Log activity for each room
@@ -1012,7 +1021,7 @@ exports.deleteFilePermanent = asyncHandler(async (req, res) => {
           roomId: room._id,
           roomName: room.name,
           reason: "File permanently deleted by owner",
-        }
+        },
       );
     }
   }
@@ -1039,7 +1048,7 @@ exports.deleteFilePermanent = asyncHandler(async (req, res) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 
   res.status(200).json({
@@ -1179,7 +1188,7 @@ exports.toggleStarFile = asyncHandler(async (req, res) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 
   res.status(200).json({
@@ -1255,7 +1264,7 @@ exports.updateFile = asyncHandler(async (req, res) => {
     const newName = await generateUniqueFileName(
       name,
       file.parentFolderId,
-      userId
+      userId,
     );
     file.name = newName;
   }
@@ -1323,7 +1332,7 @@ exports.updateFile = asyncHandler(async (req, res) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
   console.log("File metadata updated:", file);
   res.status(200).json({
@@ -1393,7 +1402,7 @@ exports.moveFile = asyncHandler(async (req, res) => {
   const updatedFile = await File.findByIdAndUpdate(
     fileId,
     { $set: updateData },
-    { new: true, runValidators: true }
+    { new: true, runValidators: true },
   );
 
   if (!updatedFile) {
@@ -1403,7 +1412,7 @@ exports.moveFile = asyncHandler(async (req, res) => {
   // ✅ إعادة جلب الملف للتأكد من أن البيانات محدثة
   const refreshedFile = await File.findById(fileId).populate(
     "parentFolderId",
-    "name"
+    "name",
   );
 
   // Update folder sizes
@@ -1431,7 +1440,7 @@ exports.moveFile = asyncHandler(async (req, res) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 
   res.status(200).json({
@@ -1518,7 +1527,7 @@ exports.shareFile = asyncHandler(async (req, res) => {
 
   // Don't allow sharing with yourself
   const usersToShare = users.filter(
-    (id) => id.toString() !== userId.toString()
+    (id) => id.toString() !== userId.toString(),
   );
   if (usersToShare.length === 0) {
     return res.status(400).json({ message: "Cannot share with yourself" });
@@ -1527,7 +1536,7 @@ exports.shareFile = asyncHandler(async (req, res) => {
   // Add users to sharedWith array (avoid duplicates)
   const alreadyShared = file.sharedWith.map((sw) => sw.user.toString());
   const newUsers = usersToShare.filter(
-    (id) => !alreadyShared.includes(id.toString())
+    (id) => !alreadyShared.includes(id.toString()),
   );
 
   for (const userIdToAdd of newUsers) {
@@ -1559,7 +1568,7 @@ exports.shareFile = asyncHandler(async (req, res) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 
   res.status(200).json({
@@ -1605,7 +1614,7 @@ exports.updateFilePermissions = asyncHandler(async (req, res) => {
     }
 
     const sharedEntry = file.sharedWith.find(
-      (sw) => sw.user.toString() === targetUserId.toString()
+      (sw) => sw.user.toString() === targetUserId.toString(),
     );
 
     if (sharedEntry) {
@@ -1637,7 +1646,7 @@ exports.updateFilePermissions = asyncHandler(async (req, res) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 
   res.status(200).json({
@@ -1670,7 +1679,7 @@ exports.unshareFile = asyncHandler(async (req, res) => {
 
   // Remove users from sharedWith
   file.sharedWith = file.sharedWith.filter(
-    (sw) => !users.includes(sw.user.toString())
+    (sw) => !users.includes(sw.user.toString()),
   );
 
   file.isShared = file.sharedWith.length > 0;
@@ -1695,7 +1704,7 @@ exports.unshareFile = asyncHandler(async (req, res) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 
   res.status(200).json({
@@ -1724,7 +1733,7 @@ exports.getSharedFileDetails = asyncHandler(async (req, res) => {
   // Check if user has access
   const isOwner = file.userId._id.toString() === userId.toString();
   const sharedEntry = file.sharedWith.find(
-    (sw) => sw.user._id.toString() === userId.toString()
+    (sw) => sw.user._id.toString() === userId.toString(),
   );
 
   if (!isOwner && !sharedEntry) {
@@ -1807,7 +1816,7 @@ exports.getFilesSharedWithMe = asyncHandler(async (req, res) => {
   // Format response to include permission
   const formattedFiles = files.map((file) => {
     const sharedEntry = file.sharedWith.find(
-      (sw) => sw.user.toString() === userId.toString()
+      (sw) => sw.user.toString() === userId.toString(),
     );
     return {
       ...file.toObject(),
@@ -1873,7 +1882,7 @@ exports.getSharedFileDetailsInRoom = asyncHandler(async (req, res, next) => {
   let sharedByUser = null;
   if (fileInRoom.sharedBy) {
     sharedByUser = await User.findById(fileInRoom.sharedBy).select(
-      "name email"
+      "name email",
     );
   }
 
@@ -2105,7 +2114,7 @@ exports.getCategoriesStats = asyncHandler(async (req, res) => {
       acc.totalSize += stat.totalSize;
       return acc;
     },
-    { totalFiles: 0, totalSize: 0 }
+    { totalFiles: 0, totalSize: 0 },
   );
 
   // دالة تنسيق الحجم
@@ -2247,7 +2256,7 @@ exports.downloadFile = asyncHandler(async (req, res, next) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 
   // Send file
@@ -2351,7 +2360,7 @@ exports.downloadFolder = asyncHandler(async (req, res, next) => {
     {
       ipAddress: req.ip,
       userAgent: req.get("User-Agent"),
-    }
+    },
   );
 });
 
@@ -2370,27 +2379,27 @@ async function cleanOrphanedFiles(maxAgeHours = 1) {
   try {
     // Get all files from disk
     const filesOnDisk = fs.readdirSync(uploadsDir);
-    
+
     // Get all file paths from database
     const filesInDb = await File.find({}).select("path").lean();
-    const dbPaths = new Set(filesInDb.map(f => f.path));
+    const dbPaths = new Set(filesInDb.map((f) => f.path));
 
     let deletedCount = 0;
 
     // Check each file on disk
     for (const filename of filesOnDisk) {
       const filePath = path.join(uploadsDir, filename);
-      
+
       try {
         const stats = fs.statSync(filePath);
-        
+
         // Skip if it's a directory
         if (stats.isDirectory()) {
           continue;
         }
 
         // Check if file is in database
-        const relativePath = filePath.replace(/\\/g, '/'); // Normalize path separators
+        const relativePath = filePath.replace(/\\/g, "/"); // Normalize path separators
         const isInDb = dbPaths.has(relativePath) || dbPaths.has(filePath);
 
         // Check file age
@@ -2402,14 +2411,19 @@ async function cleanOrphanedFiles(maxAgeHours = 1) {
         if (!isInDb && fileAge > maxAge) {
           fs.unlinkSync(filePath);
           deletedCount++;
-          console.log(`🧹 Cleaned up orphaned file: ${filePath} (age: ${Math.round(fileAge / 1000 / 60)} minutes)`);
+          console.log(
+            `🧹 Cleaned up orphaned file: ${filePath} (age: ${Math.round(fileAge / 1000 / 60)} minutes)`,
+          );
         }
       } catch (fileError) {
         errors.push({
           filePath: filePath,
           error: fileError.message,
         });
-        console.error(`❌ Error processing file ${filePath}:`, fileError.message);
+        console.error(
+          `❌ Error processing file ${filePath}:`,
+          fileError.message,
+        );
       }
     }
 
@@ -2446,3 +2460,30 @@ exports.cleanOrphanedFiles = asyncHandler(async (req, res) => {
     errors: result.errors,
   });
 });
+
+const updateFileContent = async (req, res) => {
+  const { content } = req.body;
+
+  const file = await File.findById(req.params.id);
+  if (!file) {
+    return res.status(404).json({ message: "File not found" });
+  }
+
+  // ✏️ استبدال المحتوى في disk
+  fs.writeFileSync(file.path, content, "utf8");
+
+  // 🔄 مسح بيانات AI القديمة
+  file.extractedText = null;
+  file.embedding = null;
+  file.summary = null;
+
+  await file.save();
+
+  // 🧠 إعادة المعالجة (نفس الصور)
+  processFile(file._id);
+
+  res.status(200).json({
+    status: "success",
+    message: "Text file updated and reprocessed",
+  });
+};
