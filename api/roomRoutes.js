@@ -27,6 +27,8 @@ const {
   updateRoom,
   downloadRoomFile,
   downloadRoomFolder,
+  excludeFileFromRoom,
+  excludeFolderFromRoom,
 } = require("../services/roomService");
 const { protect } = require("../services/authService");
 
@@ -76,6 +78,9 @@ router.post("/:id/files/:fileId/save", protect, saveFileFromRoom);
 // Remove file from room
 router.delete("/:id/files/:fileId", protect, removeFileFromRoom);
 
+// Exclude file from room (hide inherited)
+router.post("/:id/files/:fileId/exclude", protect, excludeFileFromRoom);
+
 // Share folder with room
 router.post("/:id/share-folder", protect, shareFolderWithRoom);
 
@@ -87,6 +92,9 @@ router.post("/:id/folders/:folderId/save", protect, saveFolderFromRoom);
 
 // Remove folder from room
 router.delete("/:id/folders/:folderId", protect, removeFolderFromRoom);
+
+// Exclude folder from room (hide inherited)
+router.post("/:id/folders/:folderId/exclude", protect, excludeFolderFromRoom);
 
 // Update member role
 router.put("/:id/members/:memberId", protect, updateMemberRole);

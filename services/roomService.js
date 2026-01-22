@@ -1749,7 +1749,79 @@ exports.removeFileFromRoom = asyncHandler(async (req, res, next) => {
   );
 
   if (!fileEntry) {
-    return next(new ApiError("File not found in room", 404));
+    // 💡 Check if file is inherited from a shared folder
+    const File = require("../models/fileModel");
+    const Folder = require("../models/folderModel");
+    const file = await File.findById(fileId);
+
+    if (!file) {
+      return next(new ApiError("File not found", 404));
+    }
+
+    let isInherited = false;
+    if (file.parentFolderId) {
+      const sharedFolderIds = room.folders
+        .filter((f) => f.folderId)
+        .map((f) =>
+          f.folderId._id ? f.folderId._id.toString() : f.folderId.toString()
+        );
+
+      let currentFolderId = file.parentFolderId;
+      const maxDepth = 50;
+      let depth = 0;
+
+      while (currentFolderId && depth < maxDepth) {
+        if (sharedFolderIds.includes(currentFolderId.toString())) {
+          isInherited = true;
+          break;
+        }
+        const parent = await Folder.findById(currentFolderId).select("parentId");
+        if (!parent || !parent.parentId) break;
+        currentFolderId = parent.parentId;
+        depth++;
+      }
+    }
+
+    if (!isInherited) {
+      return next(new ApiError("File not found in room", 404));
+    }
+
+    // Check permissions for hiding
+    const isFileOwner = file.userId.toString() === userId.toString();
+    if (!isRoomOwner && !isFileOwner && !hasOwnerRole && !hasEditorRole) {
+      return next(
+        new ApiError(
+          "Only room owner, file owner, or members with owner/editor role can hide items",
+          403
+        )
+      );
+    }
+
+    // Add to excludedFiles if not already there
+    if (!room.excludedFiles.includes(fileId)) {
+      room.excludedFiles.push(fileId);
+      await room.save();
+    }
+
+    // Log activity
+    await logActivity(
+      userId,
+      "file_hidden_in_room",
+      "file",
+      fileId,
+      file.name,
+      {
+        roomId: room._id,
+        roomName: room.name,
+        hiddenBy: userId,
+      }
+    );
+
+    return res.status(200).json({
+      message: "✅ Inherited file hidden from room successfully",
+      file: { _id: fileId, name: file.name },
+      room: { _id: room._id, name: room.name },
+    });
   }
 
   const file = fileEntry.fileId;
@@ -1886,7 +1958,78 @@ exports.removeFolderFromRoom = asyncHandler(async (req, res, next) => {
   );
 
   if (!folderEntry) {
-    return next(new ApiError("Folder not found in room", 404));
+    // 💡 Check if folder is inherited from a shared folder
+    const Folder = require("../models/folderModel");
+    const originalFolder = await Folder.findById(folderId);
+
+    if (!originalFolder) {
+      return next(new ApiError("Folder not found", 404));
+    }
+
+    let isInherited = false;
+    if (originalFolder.parentId) {
+      const sharedFolderIds = room.folders
+        .filter((f) => f.folderId)
+        .map((f) =>
+          f.folderId._id ? f.folderId._id.toString() : f.folderId.toString()
+        );
+
+      let currentFolderId = originalFolder.parentId;
+      const maxDepth = 50;
+      let depth = 0;
+
+      while (currentFolderId && depth < maxDepth) {
+        if (sharedFolderIds.includes(currentFolderId.toString())) {
+          isInherited = true;
+          break;
+        }
+        const parent = await Folder.findById(currentFolderId).select("parentId");
+        if (!parent || !parent.parentId) break;
+        currentFolderId = parent.parentId;
+        depth++;
+      }
+    }
+
+    if (!isInherited) {
+      return next(new ApiError("Folder not found in room", 404));
+    }
+
+    // Check permissions for hiding
+    const isFolderOwner = originalFolder.userId.toString() === userId.toString();
+    if (!isRoomOwner && !isFolderOwner && !hasOwnerRole && !hasEditorRole) {
+      return next(
+        new ApiError(
+          "Only room owner, folder owner, or members with owner/editor role can hide items",
+          403
+        )
+      );
+    }
+
+    // Add to excludedFolders if not already there
+    if (!room.excludedFolders.includes(folderId)) {
+      room.excludedFolders.push(folderId);
+      await room.save();
+    }
+
+    // Log activity
+    await logActivity(
+      userId,
+      "folder_hidden_in_room",
+      "folder",
+      folderId,
+      originalFolder.name,
+      {
+        roomId: room._id,
+        roomName: room.name,
+        hiddenBy: userId,
+      }
+    );
+
+    return res.status(200).json({
+      message: "✅ Inherited folder hidden from room successfully",
+      folder: { _id: folderId, name: originalFolder.name },
+      room: { _id: room._id, name: room.name },
+    });
   }
 
   const folder = folderEntry.folderId;
@@ -1985,6 +2128,11 @@ exports.downloadRoomFile = asyncHandler(async (req, res, next) => {
   const room = await Room.findById(roomId).populate("files.fileId");
   if (!room) {
     return next(new ApiError("Room not found", 404));
+  }
+
+  // Check if file is excluded/hidden in this room
+  if (room.excludedFiles && room.excludedFiles.includes(fileId)) {
+    return next(new ApiError("File not shared in this room (hidden)", 404));
   }
 
   // Check if user is a member
@@ -2236,6 +2384,11 @@ exports.downloadRoomFolder = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Room not found", 404));
   }
 
+  // Check if folder is excluded/hidden in this room
+  if (room.excludedFolders && room.excludedFolders.includes(folderId)) {
+    return next(new ApiError("Folder not shared in this room (hidden)", 404));
+  }
+
   // Check if user is a member
   const isMember = room.members.some(
     (m) => m.user.toString() === userId.toString()
@@ -2271,7 +2424,7 @@ exports.downloadRoomFolder = asyncHandler(async (req, res, next) => {
   const File = require("../models/fileModel");
   const Folder = require("../models/folderModel");
 
-  const getAllFilesInFolder = async (targetFolderId) => {
+  const getAllContentsInFolder = async (targetFolderId, basePath = "") => {
     const files = await File.find({
       parentFolderId: targetFolderId,
       userId: folder.userId,
@@ -2284,21 +2437,37 @@ exports.downloadRoomFolder = asyncHandler(async (req, res, next) => {
       isDeleted: false,
     });
 
-    const allFiles = [...files];
+    let allFiles = [];
+    let allFolders = [];
 
-    for (const subfolder of subfolders) {
-      const subfolderFiles = await getAllFilesInFolder(subfolder._id);
-      allFiles.push(...subfolderFiles);
+    // Files in this folder
+    for (const file of files) {
+      allFiles.push({
+        path: file.path,
+        name: file.name,
+        relativePath: path.join(basePath, file.name),
+      });
     }
 
-    return allFiles;
+    // Recurse into subfolders
+    for (const subfolder of subfolders) {
+      const subPath = path.join(basePath, subfolder.name);
+      allFolders.push(subPath); // Record subfolder path
+      
+      const subContents = await getAllContentsInFolder(
+        subfolder._id,
+        subPath
+      );
+      allFiles.push(...subContents.files);
+      allFolders.push(...subContents.folders);
+    }
+
+    return { files: allFiles, folders: allFolders };
   };
 
-  const allFiles = await getAllFilesInFolder(folderId);
+  const { files: allFiles, folders: allFolders } = await getAllContentsInFolder(folderId);
 
-  if (allFiles.length === 0) {
-    return next(new ApiError("Folder is empty", 400));
-  }
+  // Removed: if (allFiles.length === 0) check to allow empty folders
 
   // Create zip archive
   const archive = archiver("zip", {
@@ -2312,12 +2481,16 @@ exports.downloadRoomFolder = asyncHandler(async (req, res, next) => {
   // Pipe archive data to response
   archive.pipe(res);
 
+  // Add empty folder entries first (optional but good for structure)
+  for (const folderPath of allFolders) {
+    archive.append(null, { name: folderPath + "/" });
+  }
+
   // Add files to archive
   for (const file of allFiles) {
     if (fs.existsSync(file.path)) {
-      // Get relative path from folder
-      const relativePath = file.name; // Simplified - you might want to preserve folder structure
-      archive.file(file.path, { name: relativePath });
+      // Use preserved relative structure
+      archive.file(file.path, { name: file.relativePath });
     }
   }
 
@@ -2451,6 +2624,11 @@ exports.saveFileFromRoom = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Room not found", 404));
   }
 
+  // Check if file is excluded/hidden in this room
+  if (room.excludedFiles && room.excludedFiles.includes(fileId)) {
+    return next(new ApiError("File not shared in this room (hidden)", 404));
+  }
+
   // Check if user is a member
   const isMember = room.members.some(
     (m) => m.user.toString() === userId.toString()
@@ -2459,17 +2637,70 @@ exports.saveFileFromRoom = asyncHandler(async (req, res, next) => {
     return next(new ApiError("You must be a room member to save files", 403));
   }
 
-  // Find file entry
-  const fileEntry = room.files.find(
+  // Find file entry in room.files (directly shared files)
+  let fileEntry = room.files.find(
     (f) =>
       f.fileId &&
       (f.fileId._id ? f.fileId._id.toString() : f.fileId.toString()) === fileId
   );
-  if (!fileEntry) {
-    return next(new ApiError("File not shared in this room", 404));
+
+  let originalFile = fileEntry ? fileEntry.fileId : null;
+
+  // If not directly shared, check if it's inside a shared folder
+  if (!originalFile) {
+    const File = require("../models/fileModel");
+    const Folder = require("../models/folderModel");
+
+    // Check if file exists in DB
+    originalFile = await File.findById(fileId);
+    if (!originalFile) {
+      return next(new ApiError("File not found", 404));
+    }
+
+    // Check if file is inside a folder that is shared in this room
+    if (originalFile.parentFolderId) {
+      // Get all folder IDs that are shared in this room
+      const sharedFolderIds = room.folders
+        .filter((folderEntry) => folderEntry.folderId)
+        .map((folderEntry) =>
+          folderEntry.folderId._id
+            ? folderEntry.folderId._id.toString()
+            : folderEntry.folderId.toString()
+        );
+
+      // Check if file's parent folder (or any ancestor) is in the shared folders
+      let currentFolderId = originalFile.parentFolderId;
+      let isFileInSharedFolder = false;
+      const maxDepth = 100; // Prevent infinite loops
+      let depth = 0;
+
+      while (currentFolderId && depth < maxDepth) {
+        const currentFolderIdStr = currentFolderId.toString();
+
+        // Check if this folder is directly shared
+        if (sharedFolderIds.includes(currentFolderIdStr)) {
+          isFileInSharedFolder = true;
+          break;
+        }
+
+        // Check parent folder
+        const folder = await Folder.findById(currentFolderId).select("parentId");
+        if (!folder || !folder.parentId) {
+          break;
+        }
+        currentFolderId = folder.parentId;
+        depth++;
+      }
+
+      if (!isFileInSharedFolder) {
+        return next(new ApiError("File not shared in this room", 404));
+      }
+    } else {
+      // File has no parent folder and is not directly shared
+      return next(new ApiError("File not shared in this room", 404));
+    }
   }
 
-  const originalFile = fileEntry.fileId;
   if (!originalFile) {
     return next(new ApiError("File not found", 404));
   }
@@ -2487,23 +2718,9 @@ exports.saveFileFromRoom = asyncHandler(async (req, res, next) => {
     return next(error);
   }
 
-  // Check if user already has this file (optional check)
+  // No blocking check here - the unique name generator below handles conflicts
   const File = require("../models/fileModel");
-  const existingFile = await File.findOne({
-    userId: userId,
-    name: originalFile.name,
-    parentFolderId: parentFolderId || null,
-    isDeleted: false,
-  });
 
-  if (existingFile) {
-    return next(
-      new ApiError(
-        "You already have a file with this name in this location",
-        400
-      )
-    );
-  }
 
   // Generate unique file name
   const pathUtil = require("path");
@@ -2518,14 +2735,13 @@ exports.saveFileFromRoom = asyncHandler(async (req, res, next) => {
       name: finalName,
       parentFolderId: parentFolderId || null,
       userId: userId,
-      isDeleted: false,
     });
 
     if (!existingFileCheck) {
       break;
     }
 
-    const baseNameWithoutNumber = fileBaseName.replace(/\(\d+\)$/, "");
+    const baseNameWithoutNumber = fileBaseName.replace(/\s*\(\d+\)$/, "").trim();
     finalName = `${baseNameWithoutNumber} (${counter})${fileExt}`;
     counter += 1;
   }
@@ -2613,6 +2829,11 @@ exports.saveFolderFromRoom = asyncHandler(async (req, res, next) => {
     return next(new ApiError("Room not found", 404));
   }
 
+  // Check if folder is excluded/hidden in this room
+  if (room.excludedFolders && room.excludedFolders.includes(folderId)) {
+    return next(new ApiError("Folder not shared in this room (hidden)", 404));
+  }
+
   // Check if user is a member
   const isMember = room.members.some(
     (m) => m.user.toString() === userId.toString()
@@ -2621,18 +2842,70 @@ exports.saveFolderFromRoom = asyncHandler(async (req, res, next) => {
     return next(new ApiError("You must be a room member to save folders", 403));
   }
 
-  // Find folder entry
-  const folderEntry = room.folders.find(
+  // Find folder entry in room.folders (directly shared folders)
+  let folderEntry = room.folders.find(
     (f) =>
       f.folderId &&
       (f.folderId._id ? f.folderId._id.toString() : f.folderId.toString()) ===
         folderId
   );
-  if (!folderEntry) {
-    return next(new ApiError("Folder not shared in this room", 404));
+
+  let originalFolder = folderEntry ? folderEntry.folderId : null;
+
+  // If not directly shared, check if it's inside a shared folder
+  if (!originalFolder) {
+    const Folder = require("../models/folderModel");
+
+    // Check if folder exists in DB
+    originalFolder = await Folder.findById(folderId);
+    if (!originalFolder) {
+      return next(new ApiError("Folder not found", 404));
+    }
+
+    // Check if folder is inside a parent folder that is shared in this room
+    if (originalFolder.parentId) {
+      // Get all folder IDs that are shared in this room
+      const sharedFolderIds = room.folders
+        .filter((folderEntry) => folderEntry.folderId)
+        .map((folderEntry) =>
+          folderEntry.folderId._id
+            ? folderEntry.folderId._id.toString()
+            : folderEntry.folderId.toString()
+        );
+
+      // Check if folder's parent folder (or any ancestor) is in the shared folders
+      let currentFolderId = originalFolder.parentId;
+      let isFolderInSharedFolder = false;
+      const maxDepth = 100; // Prevent infinite loops
+      let depth = 0;
+
+      while (currentFolderId && depth < maxDepth) {
+        const currentFolderIdStr = currentFolderId.toString();
+
+        // Check if this folder is directly shared
+        if (sharedFolderIds.includes(currentFolderIdStr)) {
+          isFolderInSharedFolder = true;
+          break;
+        }
+
+        // Check parent folder
+        const folder = await Folder.findById(currentFolderId).select("parentId");
+        if (!folder || !folder.parentId) {
+          break;
+        }
+        currentFolderId = folder.parentId;
+        depth++;
+      }
+
+      if (!isFolderInSharedFolder) {
+        return next(new ApiError("Folder not shared in this room", 404));
+      }
+    } else {
+      // Folder has no parent and is not directly shared
+      return next(new ApiError("Folder not shared in this room", 404));
+    }
   }
 
-  const originalFolder = folderEntry.folderId;
   if (!originalFolder) {
     return next(new ApiError("Folder not found", 404));
   }
@@ -2650,14 +2923,13 @@ exports.saveFolderFromRoom = asyncHandler(async (req, res, next) => {
       name: finalFolderName,
       parentId: parentFolderId || null,
       userId: userId,
-      isDeleted: false,
     });
 
     if (!existingFolderCheck) {
       break;
     }
 
-    const baseNameWithoutNumber = originalFolder.name.replace(/\(\d+\)$/, "");
+    const baseNameWithoutNumber = originalFolder.name.replace(/\s*\(\d+\)$/, "").trim();
     finalFolderName = `${baseNameWithoutNumber} (${counter})`;
     counter += 1;
   }
@@ -3078,5 +3350,138 @@ exports.accessOneTimeFile = asyncHandler(async (req, res, next) => {
     message: "File accessed",
     oneTime: false,
     file,
+  });
+});
+
+// @desc    Exclude file from room view (hide inherited file)
+// @route   POST /api/rooms/:id/files/:fileId/exclude
+// @access  Private
+exports.excludeFileFromRoom = asyncHandler(async (req, res, next) => {
+  const { id: roomId, fileId } = req.params;
+  const userId = req.user._id;
+
+  const room = await Room.findById(roomId);
+  if (!room) {
+    return next(new ApiError("Room not found", 404));
+  }
+
+  // Check if user is a member
+  const member = room.members.find(
+    (m) => m.user.toString() === userId.toString()
+  );
+  if (!member) {
+    return next(new ApiError("Access denied", 403));
+  }
+
+  const isRoomOwner = room.owner.toString() === userId.toString();
+  const hasRole = member.role === "owner" || member.role === "editor";
+
+  // Get file info for logging and uploader check
+  const File = require("../models/fileModel");
+  const file = await File.findById(fileId);
+  if (!file) {
+    return next(new ApiError("File not found", 404));
+  }
+
+  const isFileOwner = file.userId.toString() === userId.toString();
+
+  // Permissions: Room Owner, File Owner, or Editor/Owner role
+  if (!isRoomOwner && !isFileOwner && !hasRole) {
+    return next(
+      new ApiError(
+        "Only room owner, file owner, or members with owner/editor role can hide items",
+        403
+      )
+    );
+  }
+
+  // Add to excludedFiles if not already there
+  if (!room.excludedFiles.includes(fileId)) {
+    room.excludedFiles.push(fileId);
+    await room.save();
+  }
+
+  // Log activity
+  await logActivity(userId, "file_hidden_in_room", "file", fileId, file.name, {
+    roomId: room._id,
+    roomName: room.name,
+    hiddenBy: userId,
+    viaRoute: "exclude",
+  });
+
+  res.status(200).json({
+    message: "✅ File excluded from room successfully",
+    roomId,
+    fileId,
+  });
+});
+
+// @desc    Exclude folder from room view (hide inherited folder)
+// @route   POST /api/rooms/:id/folders/:folderId/exclude
+// @access  Private
+exports.excludeFolderFromRoom = asyncHandler(async (req, res, next) => {
+  const { id: roomId, folderId } = req.params;
+  const userId = req.user._id;
+
+  const room = await Room.findById(roomId);
+  if (!room) {
+    return next(new ApiError("Room not found", 404));
+  }
+
+  // Check if user is a member
+  const member = room.members.find(
+    (m) => m.user.toString() === userId.toString()
+  );
+  if (!member) {
+    return next(new ApiError("Access denied", 403));
+  }
+
+  const isRoomOwner = room.owner.toString() === userId.toString();
+  const hasRole = member.role === "owner" || member.role === "editor";
+
+  // Get folder info for logging and uploader check
+  const Folder = require("../models/folderModel");
+  const folder = await Folder.findById(folderId);
+  if (!folder) {
+    return next(new ApiError("Folder not found", 404));
+  }
+
+  const isFolderOwner = folder.userId.toString() === userId.toString();
+
+  // Permissions: Room Owner, Folder Owner, or Editor/Owner role
+  if (!isRoomOwner && !isFolderOwner && !hasRole) {
+    return next(
+      new ApiError(
+        "Only room owner, folder owner, or members with owner/editor role can hide items",
+        403
+      )
+    );
+  }
+
+  // Add to excludedFolders if not already there
+  if (!room.excludedFolders.includes(folderId)) {
+    room.excludedFolders.push(folderId);
+    await room.save();
+  }
+
+  // Log activity
+  await logActivity(
+    userId,
+    "folder_hidden_in_room",
+    "folder",
+    folderId,
+    folder.name,
+    {
+      roomId: room._id,
+      roomName: room.name,
+      hiddenBy: userId,
+      viaRoute: "exclude",
+    }
+  );
+
+  res.status(200).json({
+    message: "✅ Folder excluded from room successfully",
+    roomId,
+    folderId,
   });
 });

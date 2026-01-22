@@ -25,7 +25,7 @@ async function generateUniqueFolderName(baseName, parentId, userId) {
       break;
     }
 
-    const baseNameWithoutNumber = baseName.replace(/\(\d+\)$/, "");
+    const baseNameWithoutNumber = baseName.replace(/\s*\(\d+\)$/, "").trim();
     finalName = `${baseNameWithoutNumber} (${counter})`;
     counter++;
   }
@@ -863,6 +863,21 @@ exports.getFolderContents = asyncHandler(async (req, res, next) => {
     parentFolderId: folderId,
     isDeleted: false,
   }).sort({ createdAt: -1 });
+
+  // 💡 Filter out excluded items if in a room context
+  const room = req.room;
+  if (room) {
+    const excludedFileIds = (room.excludedFiles || []).map((id) => id.toString());
+    const excludedFolderIds = (room.excludedFolders || []).map((id) => id.toString());
+
+    if (excludedFileIds.length > 0) {
+      // Logic for filtering files
+    }
+    
+    // We filter the combined list later, but let's filter the source lists now for accuracy
+    allSubfolders = allSubfolders.filter(f => !excludedFolderIds.includes(f._id.toString()));
+    allFiles = allFiles.filter(f => !excludedFileIds.includes(f._id.toString()));
+  }
 
   const totalSubfolders = allSubfolders.length;
   const totalFiles = allFiles.length;
@@ -2147,15 +2162,55 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
 
   // Check if folder is shared in a room where user is a member
   let isSharedInRoom = false;
+  let attachedRoom = null;
+
   if (!isOwner && !isSharedWith) {
     const Room = require("../models/roomModel");
-    const room = await Room.findOne({
-      "folders.folderId": folderId,
+    
+    // Get all rooms where user is a member
+    const userRooms = await Room.find({
       "members.user": userId,
       isActive: true,
     }).lean();
 
-    isSharedInRoom = !!room;
+    for (const room of userRooms) {
+      const sharedFolderIds = room.folders
+        .filter((f) => f.folderId)
+        .map((f) => f.folderId.toString());
+
+      // Check if this folder or any parent is in sharedFolderIds
+      let currentFolderId = folderId;
+      const maxDepth = 50;
+      let depth = 0;
+      let foundInThisRoom = false;
+
+      while (currentFolderId && depth < maxDepth) {
+        if (sharedFolderIds.includes(currentFolderId.toString())) {
+          foundInThisRoom = true;
+          break;
+        }
+        
+        // We need the parentId of the current folder to continue up
+        // If it's the target folder, we already have it. 
+        // For others, we need to fetch them.
+        let currentFolder;
+        if (currentFolderId.toString() === folderId.toString()) {
+           currentFolder = folder;
+        } else {
+           currentFolder = await Folder.findById(currentFolderId).select("parentId");
+        }
+
+        if (!currentFolder || !currentFolder.parentId) break;
+        currentFolderId = currentFolder.parentId;
+        depth++;
+      }
+
+      if (foundInThisRoom) {
+        isSharedInRoom = true;
+        attachedRoom = room;
+        break;
+      }
+    }
   }
 
   // Check access permissions
@@ -2166,6 +2221,11 @@ exports.checkFolderAccess = asyncHandler(async (req, res, next) => {
         403
       )
     );
+  }
+
+  // Attach room to request if found via room sharing
+  if (attachedRoom) {
+    req.room = attachedRoom;
   }
 
   // If folder is protected and user is not the owner, require verification

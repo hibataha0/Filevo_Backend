@@ -29,6 +29,8 @@ const {
   downloadFile,
   downloadFolder,
   getStorageInfo,
+  updateImageContent,
+  updateFileContent,
 } = require("../services/fileService");
 const { protect } = require("../services/authService");
 const {
@@ -68,6 +70,7 @@ router.post(
   uploadMultipleFilesMiddleware,
   uploadMultipleFiles,
 );
+const memoryUpload = multer({ storage: multer.memoryStorage() });
 
 // Get all files for user
 router.get("/", protect, getAllFiles);
@@ -124,9 +127,27 @@ router.put("/:id/move", protect, moveFile);
 router.post("/:id/share", protect, shareFile);
 router.put("/:id/share", protect, updateFilePermissions);
 router.delete("/:id/share", protect, unshareFile);
+router.put("/:id/content", protect, updateFileContent);
+router.put(
+  "/:id/image",
+  protect,
+  memoryUpload.single("image"),
+  updateImageContent,
+);
 
 // Update file metadata (must be before delete and get routes)
 router.put("/:id", protect, updateFile);
+
+// Update file text content
+router.put("/:id/text", protect, updateFileContent);
+
+// Update file/image binary content
+router.put(
+  "/:id/content",
+  protect,
+  uploadSingleFileMiddleware,
+  updateImageContent,
+);
 
 // Delete file (move to trash)
 router.delete("/:id", protect, deleteFile);

@@ -99,6 +99,18 @@ const roomSchema = new mongoose.Schema(
         },
       },
     ],
+    excludedFiles: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "File",
+      },
+    ],
+    excludedFolders: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Folder",
+      },
+    ],
     isActive: {
       type: Boolean,
       default: true,

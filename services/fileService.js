@@ -31,7 +31,7 @@ async function generateUniqueFileName(originalName, parentFolderId, userId) {
     }
 
     // Extract base name without existing number
-    const baseNameWithoutNumber = baseName.replace(/\(\d+\)$/, "");
+    const baseNameWithoutNumber = baseName.replace(/\s*\(\d+\)$/, "").trim();
     finalName = `${baseNameWithoutNumber} (${counter})${ext}`;
     counter++;
   }
@@ -230,6 +230,25 @@ exports.uploadMultipleFiles = asyncHandler(async (req, res) => {
         // ✅ التحقق من المساحة التخزينية قبل الرفع
         await checkStorageSpace(userId, file.size);
 
+        // ✅ فحص الفيروسات
+        // إذا فشل الفحص، سيتم رمي خطأ وإيقاف المعالجة
+        // يمكنك تعديل التعامل مع الخطأ حسب الرغبة (مثلاً تجاهل الفحص عند فشل الاتصال)
+        const { scanFileWithVirusTotal } = require("./virusTotalService");
+        
+        console.log(`🔍 Scanning file for viruses: ${file.originalname}`);
+        const scanResult = await scanFileWithVirusTotal(file.path);
+        
+        // التحقق من النتيجة (هذا يعتمد على هيكلية رد VirusTotal API v3)
+        // عادة في v3 analysis object يكون: data.attributes.stats
+        const stats = scanResult.data && scanResult.data.attributes && scanResult.data.attributes.stats;
+        
+        if (stats && stats.malicious > 0) {
+           console.error(`❌ Malware detected in file: ${file.originalname}`);
+           throw new Error("❌ File contains malware and cannot be uploaded.");
+        }
+        
+        console.log(`✅ File is clean: ${file.originalname}`);
+
         const category = getCategoryByExtension(
           file.originalname,
           file.mimetype,
@@ -389,6 +408,24 @@ exports.uploadSingleFile = asyncHandler(async (req, res) => {
   try {
     // ✅ التحقق من المساحة التخزينية قبل الرفع
     await checkStorageSpace(userId, file.size);
+
+    // ✅ فحص الفيروسات
+    const { scanFileWithVirusTotal } = require("./virusTotalService");
+    
+    console.log(`🔍 Scanning file for viruses: ${file.originalname}`);
+    const scanResult = await scanFileWithVirusTotal(file.path);
+    
+    const stats = scanResult.data && scanResult.data.attributes && scanResult.data.attributes.stats;
+    
+    if (stats && stats.malicious > 0) {
+       console.error(`❌ Malware detected in file: ${file.originalname}`);
+       fs.unlinkSync(file.path); // Delete the malicious file immediately
+       return res.status(400).json({
+         message: "❌ File contains malware and cannot be uploaded.",
+       });
+    }
+    
+    console.log(`✅ File is clean: ${file.originalname}`);
 
     const category = getCategoryByExtension(file.originalname, file.mimetype); // Determine file category
 
@@ -2294,7 +2331,7 @@ exports.downloadFolder = asyncHandler(async (req, res, next) => {
   }
 
   // Recursively get all files in folder
-  const getAllFilesInFolder = async (folderIdParam) => {
+  const getAllContentsInFolder = async (folderIdParam, basePath = "") => {
     const files = await File.find({
       parentFolderId: folderIdParam,
       userId: userId,
@@ -2307,21 +2344,36 @@ exports.downloadFolder = asyncHandler(async (req, res, next) => {
       isDeleted: false,
     });
 
-    const allFiles = [...files];
+    let allFiles = [];
+    let allFolders = [];
 
-    for (const subfolder of subfolders) {
-      const subfolderFiles = await getAllFilesInFolder(subfolder._id);
-      allFiles.push(...subfolderFiles);
+    // Files in this folder
+    for (const file of files) {
+      allFiles.push({
+        path: file.path,
+        name: file.name,
+        relativePath: path.join(basePath, file.name),
+      });
     }
 
-    return allFiles;
+    for (const subfolder of subfolders) {
+      const subPath = path.join(basePath, subfolder.name);
+      allFolders.push(subPath);
+
+      const subContents = await getAllContentsInFolder(
+        subfolder._id,
+        subPath
+      );
+      allFiles.push(...subContents.files);
+      allFolders.push(...subContents.folders);
+    }
+
+    return { files: allFiles, folders: allFolders };
   };
 
-  const allFiles = await getAllFilesInFolder(folderId);
+  const { files: allFiles, folders: allFolders } = await getAllContentsInFolder(folderId);
 
-  if (allFiles.length === 0) {
-    return next(new ApiError("Folder is empty", 400));
-  }
+  // Removed: if (allFiles.length === 0) check to allow empty folders
 
   // Create zip archive
   const archive = archiver("zip", {
@@ -2335,12 +2387,16 @@ exports.downloadFolder = asyncHandler(async (req, res, next) => {
   // Pipe archive data to response
   archive.pipe(res);
 
+  // Add folder entries (essential for empty subfolders)
+  for (const folderPath of allFolders) {
+    archive.append(null, { name: folderPath + "/" });
+  }
+
   // Add files to archive
   for (const file of allFiles) {
     if (fs.existsSync(file.path)) {
-      // Get relative path from folder
-      const relativePath = file.name; // Simplified - you might want to preserve folder structure
-      archive.file(file.path, { name: relativePath });
+      // Use preserved relative structure
+      archive.file(file.path, { name: file.relativePath });
     }
   }
 
@@ -2461,29 +2517,125 @@ exports.cleanOrphanedFiles = asyncHandler(async (req, res) => {
   });
 });
 
-const updateFileContent = async (req, res) => {
+exports.updateFileContent = asyncHandler(async (req, res) => {
+  const fileId = req.params.id;
+  const userId = req.user._id;
   const { content } = req.body;
 
-  const file = await File.findById(req.params.id);
+  if (content === undefined) {
+    return res.status(400).json({ message: "Content is required" });
+  }
+
+  // Find file
+  const file = await File.findOne({ _id: fileId, userId: userId });
   if (!file) {
     return res.status(404).json({ message: "File not found" });
   }
 
-  // ✏️ استبدال المحتوى في disk
+  // Check if file exists on server
+  if (!fs.existsSync(file.path)) {
+    return res.status(404).json({ message: "File not found on server" });
+  }
+
+  // ✏️ Overwrite content on disk
   fs.writeFileSync(file.path, content, "utf8");
 
-  // 🔄 مسح بيانات AI القديمة
+  // Get new file size
+  const stats = fs.statSync(file.path);
+  const oldSize = file.size;
+
+  // 🔄 Update DB fields and reset AI data
+  file.size = stats.size;
   file.extractedText = null;
   file.embedding = null;
   file.summary = null;
+  file.isProcessed = false;
+  file.processedAt = null;
+  file.updatedAt = Date.now();
 
   await file.save();
 
-  // 🧠 إعادة المعالجة (نفس الصور)
-  processFile(file._id);
+  // Update storage usage and folder size
+  await updateUserStorage(userId);
+  if (file.parentFolderId) {
+    await updateFolderSize(file.parentFolderId);
+  }
+
+  // 🧠 Re-process AI data in background
+  processFile(file._id).catch((err) => {
+    console.error(
+      `❌ Background processing error after text update: ${err.message}`,
+    );
+  });
+
+  // Log activity
+  await logActivity(
+    userId,
+    "file_content_updated",
+    "file",
+    file._id,
+    file.name,
+    {
+      oldSize: oldSize,
+      newSize: file.size,
+      updateType: "text",
+    },
+    {
+      ipAddress: req.ip,
+      userAgent: req.get("User-Agent"),
+    },
+  );
 
   res.status(200).json({
     status: "success",
     message: "Text file updated and reprocessed",
+    file: file,
   });
-};
+});
+exports.updateImageContent = asyncHandler(async (req, res) => {
+  const fileId = req.params.id;
+  const userId = req.user._id;
+  const newFile = req.file; // Buffer لأننا استخدمنا memoryUpload
+
+  if (!newFile) {
+    return res.status(400).json({ message: "No file uploaded" });
+  }
+
+  // جلب الملف من الداتابيز
+  const file = await File.findOne({ _id: fileId, userId: userId });
+  if (!file) return res.status(404).json({ message: "File not found" });
+
+  const oldPath = file.path;
+
+  try {
+    // 🖼️ استبدال المحتوى على القرص
+    if (fs.existsSync(oldPath)) {
+      fs.writeFileSync(oldPath, newFile.buffer);
+    } else {
+      return res.status(404).json({ message: "File path not found on server" });
+    }
+
+    // 🔄 تحديث البيانات في الداتابيز
+    file.size = newFile.size;
+    file.type = newFile.mimetype;
+    file.updatedAt = Date.now();
+
+    // 🔄 مسح بيانات AI القديمة
+    file.extractedText = null;
+    file.embedding = null;
+    file.summary = null;
+
+    await file.save();
+
+    // 🧠 إعادة المعالجة في الخلفية
+    processFile(file._id);
+
+    res.status(200).json({
+      status: "success",
+      message: "Image updated successfully",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Error updating image" });
+  }
+});
